@@ -65,11 +65,12 @@ fn do_spreads(dst: &mut Vec<Move>, sq: Square, dir: Direction, lsb: u16, mut pat
 }
 
 fn generate_spreads(dst: &mut Vec<Move>, pos: &Position) {
+    let carry_limit = Position::carry_limit();
     for sq in pos.player_bb(pos.stm()) {
         let top = pos.stacks().top(sq).unwrap();
-        let max = pos.stacks().height(sq).min(6);
+        let max = pos.stacks().height(sq).min(carry_limit);
 
-        let start_bit = (1 << Position::CARRY_LIMIT) >> max;
+        let start_bit: u16 = (1 << carry_limit) >> max;
 
         let hits = find_hits(pos.all_blockers(), sq);
 
@@ -80,7 +81,7 @@ fn generate_spreads(dst: &mut Vec<Move>, pos: &Position) {
                 continue;
             }
 
-            let mut limit = 1 << Position::CARRY_LIMIT;
+            let mut limit: u16 = 1 << carry_limit;
 
             match pos.stacks().top(hit_sq) {
                 Some(PieceType::Wall) => {
@@ -91,7 +92,7 @@ fn generate_spreads(dst: &mut Vec<Move>, pos: &Position) {
                             sq,
                             dir,
                             start_bit,
-                            1 << (Position::CARRY_LIMIT - 1),
+                            1 << (carry_limit - 1),
                             dist as u32,
                             limit,
                         );

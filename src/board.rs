@@ -95,8 +95,9 @@ pub struct Stacks {
 }
 
 impl Stacks {
-    // all flats + cap
-    pub const MAX_HEIGHT: usize = 30 + 30 + 1;
+    // upper bound across all supported sizes: all flats from both
+    // players plus a capstone (50 + 50 + 1 for 7x7).
+    pub const MAX_HEIGHT: usize = (MAX_FLATS as usize) * 2 + 1;
 
     #[must_use]
     pub fn is_empty(&self, sq: Square) -> bool {
@@ -147,7 +148,7 @@ impl Stacks {
     fn take(&mut self, sq: Square, count: u8) -> (u8, PieceType, Option<Player>) {
         debug_assert!(count <= self.heights[sq.idx()]);
         debug_assert!(count > 0);
-        debug_assert!(count <= 6);
+        debug_assert!(count <= MAX_SIZE);
 
         let players = (self.players[sq.idx()] >> (self.heights[sq.idx()] - count)) & ((1 << count) - 1);
         let top = self.tops[sq.idx()].unwrap();
@@ -252,7 +253,12 @@ pub struct Position {
 }
 
 impl Position {
-    pub const CARRY_LIMIT: u8 = 6;
+    /// Carry limit for the currently-active board size (== N).
+    #[must_use]
+    #[inline]
+    pub fn carry_limit() -> u8 {
+        current_size()
+    }
 
     #[must_use]
     #[inline]
@@ -285,18 +291,19 @@ impl Position {
             return Err(TpsError::WrongNumberOfParts);
         }
 
+        let n = current_size() as usize;
         let ranks: Vec<&str> = parts[0].split('/').collect();
-        if ranks.len() != 6 {
+        if ranks.len() != n {
             return Err(TpsError::WrongNumberOfRanks);
         }
 
         let mut pos = Self::startpos();
 
-        for rank_idx in 0..6 {
+        for rank_idx in 0..n as u32 {
             let mut file_idx = 0;
 
-            for stack in ranks[5 - rank_idx as usize].split(',') {
-                if file_idx >= 6 {
+            for stack in ranks[n - 1 - rank_idx as usize].split(',') {
+                if file_idx as usize >= n {
                     return Err(TpsError::WrongNumberOfFiles);
                 }
 
@@ -351,7 +358,7 @@ impl Position {
                 }
             }
 
-            if file_idx > 6 {
+            if file_idx as usize > n {
                 return Err(TpsError::WrongNumberOfFiles);
             }
         }
@@ -533,7 +540,7 @@ impl Position {
                     PieceType::Flat => {}
                     PieceType::Wall => {
                         // multiple pieces dropped on the final square
-                        if pattern & (1 << (Self::CARRY_LIMIT - 1)) == 0 {
+                        if pattern & (1 << (Self::carry_limit() - 1)) == 0 {
                             return false;
                         }
 
@@ -701,19 +708,20 @@ impl Position {
 
     #[must_use]
     pub fn tps(&self) -> String {
-        let mut tps = String::with_capacity(21);
+        let n = current_size() as u32;
+        let mut tps = String::with_capacity((n * n) as usize);
 
-        for rank in (0..6).rev() {
+        for rank in (0..n).rev() {
             let mut groups = Vec::new();
 
-            let mut file = 0;
-            while file < 6 {
+            let mut file = 0u32;
+            while file < n {
                 let sq = Square::from_file_rank(file, rank).unwrap();
 
                 if self.stacks.is_empty(sq) {
                     let mut empty = 1;
 
-                    while file < 5 && self.stacks.is_empty(Square::from_file_rank(file + 1, rank).unwrap()) {
+                    while file + 1 < n && self.stacks.is_empty(Square::from_file_rank(file + 1, rank).unwrap()) {
                         file += 1;
                         empty += 1;
                     }
@@ -766,10 +774,10 @@ impl Position {
         self.players.fill(Bitboard::empty());
         self.pieces.fill(Bitboard::empty());
 
-        self.flats_in_hand.fill(30);
-        self.caps_in_hand.fill(1);
+        self.flats_in_hand.fill(FLATS.load(atomic::Ordering::Relaxed));
+        self.caps_in_hand.fill(CAPS.load(atomic::Ordering::Relaxed));
 
-        for sq_idx in 0..Square::MAX_COUNT {
+        for sq_idx in 0..Square::count() {
             let sq = Square::from_raw(sq_idx as u8).unwrap();
 
             if self.stacks.is_empty(sq) {

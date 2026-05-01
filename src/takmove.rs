@@ -34,7 +34,7 @@ pub struct Move {
 
 impl Move {
     const SQUARE_BITS: usize = 6;
-    const PATTERN_BITS: usize = 6;
+    const PATTERN_BITS: usize = 7;
     const FLAG_BITS: usize = 2;
     pub const TOTAL_BITS: usize = Self::SQUARE_BITS + Self::PATTERN_BITS + Self::FLAG_BITS;
 
@@ -142,14 +142,15 @@ impl Display for Move {
             let pattern = self.pattern();
 
             let dropped = pattern.trailing_zeros();
-            let taken = 6 - dropped;
+            let carry_limit = Position::carry_limit() as u32;
+            let taken = carry_limit - dropped;
 
             if taken == 1 {
                 write!(f, "{}{}", self.sq(), self.dir())?;
             } else {
                 write!(f, "{}{}{}", taken, self.sq(), self.dir())?;
                 if pattern.count_ones() > 1 {
-                    let mut pattern = ((pattern | (1 << Position::CARRY_LIMIT)) >> dropped) & !1;
+                    let mut pattern = ((pattern | (1u16 << carry_limit)) >> dropped) & !1;
                     while pattern != 0 {
                         let dropped = pattern.trailing_zeros();
                         pattern = (pattern >> dropped) & !1;
@@ -248,15 +249,19 @@ impl FromStr for Move {
         let taken = taken.unwrap_or(1);
         let bytes = bytes.strip_suffix(b"*").unwrap_or(bytes);
 
-        if (s.len() - next) > 6 {
+        let carry_limit = Position::carry_limit();
+        let max_drop = carry_limit;
+
+        if (s.len() - next) > carry_limit as usize {
             return Err(MoveStrError::TooManySpreadSteps);
         }
 
-        let mut pattern = 1;
-        let mut bit = 1;
+        let mut pattern = 1u16;
+        let mut bit = 1u16;
 
         for &pattern_char in &bytes[next..] {
-            if !(b'1'..=b'6').contains(&pattern_char) {
+            let max_drop_char = b'0' + max_drop;
+            if !(b'1'..=max_drop_char).contains(&pattern_char) {
                 return Err(MoveStrError::InvalidSpreadPattern);
             }
 
@@ -266,9 +271,9 @@ impl FromStr for Move {
             pattern |= bit;
         }
 
-        pattern <<= Position::CARRY_LIMIT - taken;
+        pattern <<= carry_limit - taken;
 
-        if (pattern & !((1 << (Position::CARRY_LIMIT + 1)) - 1)) != 0 {
+        if (pattern & !((1u16 << (carry_limit + 1)) - 1)) != 0 {
             return Err(MoveStrError::TooManySpreadPieces);
         }
 

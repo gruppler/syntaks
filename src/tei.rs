@@ -22,7 +22,7 @@
  */
 
 use crate::board::*;
-use crate::core::Player;
+use crate::core::{DEFAULT_SIZE, MAX_SIZE, MIN_SIZE, Player, SIZE};
 use crate::eval::static_eval;
 use crate::limit::Limits;
 use crate::perft::{perft, split_perft};
@@ -145,20 +145,40 @@ impl TeiHandler {
             return;
         }
 
+        let mut size: u8 = DEFAULT_SIZE;
         if args.is_empty() {
-            println!("info string Missing size, assuming 6x6");
+            println!("info string Missing size, assuming {}x{}", DEFAULT_SIZE, DEFAULT_SIZE);
         } else {
-            match args[0].parse::<u32>() {
-                Ok(size) => {
-                    if size != 6 {
-                        eprintln!("Only 6x6 supported");
+            match args[0].parse::<u8>() {
+                Ok(s) => {
+                    if !(MIN_SIZE..=MAX_SIZE).contains(&s) {
+                        eprintln!(
+                            "Unsupported size {} (supported: {}..={})",
+                            s, MIN_SIZE, MAX_SIZE
+                        );
                         return;
                     }
+                    size = s;
                 }
-                Err(_) => eprintln!("Invalid size"),
+                Err(_) => {
+                    eprintln!("Invalid size");
+                    return;
+                }
             }
         }
 
+        SIZE.store(size, Ordering::Release);
+        // Default piece counts per size; users can override via setoption.
+        let (default_flats, default_caps) = match size {
+            5 => (21u8, 1u8),
+            6 => (30u8, 1u8),
+            7 => (40u8, 2u8),
+            _ => (DEFAULT_FLATS, DEFAULT_CAPS),
+        };
+        FLATS.store(default_flats, Ordering::Release);
+        CAPS.store(default_caps, Ordering::Release);
+
+        self.pos = Position::startpos();
         self.searcher.reset();
     }
 
