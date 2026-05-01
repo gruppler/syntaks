@@ -587,7 +587,7 @@ impl Position {
             let dir = mv.dir();
 
             let dropped = pattern.trailing_zeros();
-            let taken = 6 - dropped;
+            let taken = Self::carry_limit() as u32 - dropped;
 
             let mut pattern = pattern >> dropped;
             let (mut players, top, new_top_player) = new_pos.stacks.take(mv.sq(), taken as u8);
