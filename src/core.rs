@@ -24,6 +24,27 @@
 use crate::bitboard::Bitboard;
 use std::fmt::{Display, Formatter, Write};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+pub const MIN_SIZE: u8 = 5;
+pub const MAX_SIZE: u8 = 7;
+pub const DEFAULT_SIZE: u8 = 6;
+pub const MAX_SQ: usize = (MAX_SIZE as usize) * (MAX_SIZE as usize);
+
+pub static SIZE: AtomicU8 = AtomicU8::new(DEFAULT_SIZE);
+
+#[must_use]
+#[inline]
+pub fn current_size() -> u8 {
+    SIZE.load(Ordering::Relaxed)
+}
+
+#[must_use]
+#[inline]
+pub fn current_size_sq() -> usize {
+    let n = current_size() as usize;
+    n * n
+}
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]

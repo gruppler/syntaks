@@ -30,18 +30,24 @@ use crate::takmove::Move;
 use std::cmp::Ordering;
 use std::str::FromStr;
 use std::sync::atomic;
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicU8, AtomicU32};
 
 pub const DEFAULT_FLATS: u8 = 30;
 pub const MIN_FLATS: u8 = 2;
-pub const MAX_FLATS: u8 = 36;
+pub const MAX_FLATS: u8 = 50;
 
 pub const DEFAULT_CAPS: u8 = 1;
 pub const MIN_CAPS: u8 = 0;
 pub const MAX_CAPS: u8 = 4;
 
+// komi is stored in half-flats (1 = 0.5 flats, 2 = 1 flat, etc.)
+pub const DEFAULT_KOMI_HALF: u32 = 4;
+pub const MIN_KOMI_HALF: u32 = 0;
+pub const MAX_KOMI_HALF: u32 = 8;
+
 pub static FLATS: AtomicU8 = AtomicU8::new(DEFAULT_FLATS);
 pub static CAPS: AtomicU8 = AtomicU8::new(DEFAULT_CAPS);
+pub static KOMI_HALF: AtomicU32 = AtomicU32::new(DEFAULT_KOMI_HALF);
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 struct Keys {
@@ -247,7 +253,18 @@ pub struct Position {
 
 impl Position {
     pub const CARRY_LIMIT: u8 = 6;
-    pub const KOMI: u32 = 2;
+
+    #[must_use]
+    #[inline]
+    pub fn komi_half() -> u32 {
+        KOMI_HALF.load(atomic::Ordering::Relaxed)
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn komi() -> u32 {
+        Self::komi_half() / 2
+    }
 
     #[must_use]
     pub fn startpos() -> Self {
@@ -466,7 +483,7 @@ impl Position {
     pub fn fcd(&self, player: Player) -> i32 {
         let p1_advantage = self.player_piece_bb(Piece::P1Flat).popcount() as i32
             - self.player_piece_bb(Piece::P2Flat).popcount() as i32
-            - Self::KOMI as i32;
+            - Self::komi() as i32;
         p1_advantage * player.sign()
     }
 
@@ -477,7 +494,7 @@ impl Position {
         }
 
         let p1_flats = self.player_piece_bb(Piece::P1Flat).popcount();
-        let p2_flats = self.player_piece_bb(Piece::P2Flat).popcount() + Self::KOMI;
+        let p2_flats = self.player_piece_bb(Piece::P2Flat).popcount() + Self::komi();
 
         match p1_flats.cmp(&p2_flats) {
             Ordering::Less => FlatCountOutcome::Win(Player::P2),

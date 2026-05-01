@@ -152,7 +152,7 @@ fn static_eval_player(pos: &Position, player: Player, komi: u32) -> Score {
 #[must_use]
 pub fn static_eval(pos: &Position) -> Score {
     let p1_score = static_eval_player(pos, Player::P1, 0);
-    let p2_score = static_eval_player(pos, Player::P2, Position::KOMI);
+    let p2_score = static_eval_player(pos, Player::P2, Position::komi());
 
     let p1_flat_bb = pos.player_piece_bb(Piece::P1Flat);
     let p2_flat_bb = pos.player_piece_bb(Piece::P2Flat);

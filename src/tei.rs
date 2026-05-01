@@ -112,14 +112,12 @@ impl TeiHandler {
     }
 
     fn handle_tei(&self) {
-        let half_komi = Position::KOMI * 2;
-
         println!("id name {} {}", NAME, VERSION);
         println!("id author {}", AUTHORS);
 
         println!(
             "option name HalfKomi type spin default {} min {} max {}",
-            half_komi, half_komi, half_komi
+            DEFAULT_KOMI_HALF, MIN_KOMI_HALF, MAX_KOMI_HALF
         );
         println!(
             "option name Flats type spin default {} min {} max {}",
@@ -207,10 +205,9 @@ impl TeiHandler {
 
         match name.as_str() {
             "halfkomi" => {
-                if let Ok(half_komi) = value.parse::<u32>()
-                    && half_komi != Position::KOMI * 2
-                {
-                    eprintln!("Unsupported komi value");
+                if let Ok(half_komi) = value.parse::<u32>() {
+                    let half_komi = half_komi.clamp(MIN_KOMI_HALF, MAX_KOMI_HALF);
+                    KOMI_HALF.store(half_komi, Ordering::Release);
                 }
             }
             "flats" => {
