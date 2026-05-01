@@ -26,25 +26,39 @@ use crate::core::{Direction, Square};
 use crate::hits::common::{generate_mask, pdep};
 use crate::hits::naive::find_hits_naive;
 
+// Magic constants are 6x6-specific. Only the first 36 entries are used;
+// the rest are sentinel zeros so the array fits Square::MAX_COUNT.
 #[rustfmt::skip]
-const MAGICS: [u64; Square::MAX_COUNT] = [
-    0x0200204004001181, 0x0101002001108a00, 0x0208081002804803, 0x0402240404000200, 0x0809088808000200, 0x2400402a20000220,
-    0x0308004090000108, 0x0040c210003200c2, 0x1610402001080248, 0x00610201018a8000, 0x80204a0800000414, 0x2008010200211100,
-    0x45002001488c0208, 0x0181101002501800, 0x1610402001080248, 0x1203040202044100, 0x0420410041830181, 0x0201800440020001,
-    0x004c018022401088, 0x008100c010400084, 0x1480410500001060, 0x0020160180100012, 0x0420410041830181, 0x808102010e000001,
-    0x1200104200040800, 0x04040c1102000008, 0x0142008202060401, 0x0241010402000ab0, 0xc304081000400002, 0x2008010200211100,
-    0xc4480004b0001002, 0x4404012a10004040, 0x1008181008018890, 0x000400881c000000, 0x0802894040220001, 0x8491034420002200,
-];
+const MAGICS: [u64; Square::MAX_COUNT] = {
+    let mut m = [0u64; Square::MAX_COUNT];
+    let src: [u64; 36] = [
+        0x0200204004001181, 0x0101002001108a00, 0x0208081002804803, 0x0402240404000200, 0x0809088808000200, 0x2400402a20000220,
+        0x0308004090000108, 0x0040c210003200c2, 0x1610402001080248, 0x00610201018a8000, 0x80204a0800000414, 0x2008010200211100,
+        0x45002001488c0208, 0x0181101002501800, 0x1610402001080248, 0x1203040202044100, 0x0420410041830181, 0x0201800440020001,
+        0x004c018022401088, 0x008100c010400084, 0x1480410500001060, 0x0020160180100012, 0x0420410041830181, 0x808102010e000001,
+        0x1200104200040800, 0x04040c1102000008, 0x0142008202060401, 0x0241010402000ab0, 0xc304081000400002, 0x2008010200211100,
+        0xc4480004b0001002, 0x4404012a10004040, 0x1008181008018890, 0x000400881c000000, 0x0802894040220001, 0x8491034420002200,
+    ];
+    let mut i = 0;
+    while i < 36 { m[i] = src[i]; i += 1; }
+    m
+};
 
 #[rustfmt::skip]
-const SHIFTS: [u32; Square::MAX_COUNT] = [
-    56, 57, 57, 57, 57, 56,
-    57, 58, 58, 58, 58, 57,
-    57, 58, 58, 58, 58, 57,
-    57, 58, 58, 58, 58, 57,
-    57, 58, 58, 58, 58, 57,
-    56, 57, 57, 57, 57, 56,
-];
+const SHIFTS: [u32; Square::MAX_COUNT] = {
+    let mut s = [64u32; Square::MAX_COUNT];
+    let src: [u32; 36] = [
+        56, 57, 57, 57, 57, 56,
+        57, 58, 58, 58, 58, 57,
+        57, 58, 58, 58, 58, 57,
+        57, 58, 58, 58, 58, 57,
+        57, 58, 58, 58, 58, 57,
+        56, 57, 57, 57, 57, 56,
+    ];
+    let mut i = 0;
+    while i < 36 { s[i] = src[i]; i += 1; }
+    s
+};
 
 #[derive(Copy, Clone, Debug)]
 struct SquareData {
@@ -63,15 +77,19 @@ struct Data {
     table_size: usize,
 }
 
+const MAGIC_SIZE: usize = 6;
+const MAGIC_SQ_COUNT: usize = MAGIC_SIZE * MAGIC_SIZE;
+
 const SQUARE_DATA: Data = {
     let mut squares = [SquareData::new(); Square::MAX_COUNT];
     let mut table_size = 0;
 
-    let mut idx = 0;
-    while let Some(sq) = Square::from_raw(idx) {
+    let mut idx: u8 = 0;
+    while (idx as usize) < MAGIC_SQ_COUNT {
+        let sq = Square::from_raw(idx).unwrap();
         let square_data = &mut squares[sq.idx()];
 
-        square_data.inv_mask = !generate_mask(sq);
+        square_data.inv_mask = !generate_mask(sq, MAGIC_SIZE);
 
         square_data.offset = table_size;
         table_size += 1 << (64 - SHIFTS[sq.idx()]);

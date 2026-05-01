@@ -225,8 +225,25 @@ impl Direction {
     }
 
     #[must_use]
-    pub const fn offset(self) -> i8 {
-        [6, -6, -1, 1][self.idx()]
+    pub fn offset(self) -> i8 {
+        let n = current_size() as i8;
+        match self {
+            Direction::Up => n,
+            Direction::Down => -n,
+            Direction::Left => -1,
+            Direction::Right => 1,
+        }
+    }
+
+    /// Const variant of [`offset`] that takes board size explicitly.
+    #[must_use]
+    pub const fn offset_const(self, n: i8) -> i8 {
+        match self {
+            Direction::Up => n,
+            Direction::Down => -n,
+            Direction::Left => -1,
+            Direction::Right => 1,
+        }
     }
 }
 
@@ -245,10 +262,17 @@ impl Display for Direction {
 pub struct Square(u8);
 
 impl Square {
-    /// Compile-time bound on the number of squares. Currently 36 (6x6);
-    /// will widen to MAX_SQ (49 = 7x7) in a follow-up commit once the
-    /// per-size tables it sizes are runtime-keyed.
-    pub const MAX_COUNT: usize = 36;
+    /// Compile-time upper bound on the number of squares (7x7 = 49).
+    /// Used for sizing arrays. Use [`Square::count`] for the actual
+    /// number of squares for the currently-active board size.
+    pub const MAX_COUNT: usize = MAX_SQ;
+
+    /// Number of squares for the currently-active board size (N*N).
+    #[must_use]
+    #[inline]
+    pub fn count() -> usize {
+        current_size_sq()
+    }
 
     /// Default square value, useful as an array-fill placeholder.
     pub const A1: Self = Self(0);
@@ -263,11 +287,23 @@ impl Square {
     }
 
     #[must_use]
-    pub const fn from_file_rank(file: u32, rank: u32) -> Option<Self> {
-        if file >= 6 || rank >= 6 {
+    pub fn from_file_rank(file: u32, rank: u32) -> Option<Self> {
+        let n = current_size() as u32;
+        if file >= n || rank >= n {
             None
         } else {
-            Some(Self((rank as u8 * 6) + file as u8))
+            Some(Self((rank * n + file) as u8))
+        }
+    }
+
+    /// Const constructor used by per-size compile-time tables; takes the
+    /// board size explicitly.
+    #[must_use]
+    pub const fn from_file_rank_const(file: u32, rank: u32, n: u32) -> Option<Self> {
+        if file >= n || rank >= n {
+            None
+        } else {
+            Some(Self((rank * n + file) as u8))
         }
     }
 
@@ -282,24 +318,31 @@ impl Square {
     }
 
     #[must_use]
-    pub const fn rank(self) -> u32 {
-        self.0 as u32 / 6
+    pub fn rank(self) -> u32 {
+        self.0 as u32 / current_size() as u32
     }
 
     #[must_use]
-    pub const fn file(self) -> u32 {
-        self.0 as u32 % 6
+    pub fn file(self) -> u32 {
+        self.0 as u32 % current_size() as u32
     }
 
     #[must_use]
-    pub const fn bb(self) -> Bitboard {
+    pub fn bb(self) -> Bitboard {
         Bitboard::from_raw(1 << self.idx())
     }
 
+    /// Const single-bit bitboard for this square. Doesn't apply the
+    /// runtime size mask, so callers must keep the index in range.
     #[must_use]
-    pub const fn shift(self, dir: Direction) -> Option<Self> {
+    pub const fn bb_const(self) -> Bitboard {
+        Bitboard::from_raw_unmasked(1 << self.idx())
+    }
+
+    #[must_use]
+    pub fn shift(self, dir: Direction) -> Option<Self> {
         let shifted = self.0 as i8 + dir.offset();
-        if shifted >= 0 && (shifted as usize) < 36 {
+        if shifted >= 0 && (shifted as usize) < Self::count() {
             Some(Self(shifted as u8))
         } else {
             None
@@ -307,17 +350,53 @@ impl Square {
     }
 
     #[must_use]
-    pub const fn shift_checked(self, dir: Direction) -> Option<Self> {
+    pub fn shift_checked(self, dir: Direction) -> Option<Self> {
+        let n = current_size() as u32;
         match dir {
             Direction::Left if self.file() == 0 => None,
-            Direction::Right if self.file() == 5 => None,
+            Direction::Right if self.file() + 1 == n => None,
             _ => self.shift(dir),
+        }
+    }
+
+    /// Const variant of [`shift_checked`] that takes board size explicitly.
+    /// Used by per-size compile-time tables.
+    #[must_use]
+    pub const fn shift_checked_const(self, dir: Direction, n: u32) -> Option<Self> {
+        let file = self.0 as u32 % n;
+        match dir {
+            Direction::Left => {
+                if file == 0 {
+                    return None;
+                }
+            }
+            Direction::Right => {
+                if file + 1 == n {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+        let off: i8 = match dir {
+            Direction::Up => n as i8,
+            Direction::Down => -(n as i8),
+            Direction::Left => -1,
+            Direction::Right => 1,
+        };
+        let shifted = self.0 as i32 + off as i32;
+        if shifted >= 0 && (shifted as u32) < n * n {
+            Some(Self(shifted as u8))
+        } else {
+            None
         }
     }
 
     #[must_use]
     pub fn all() -> SquareIterator {
-        SquareIterator { raw: 0, limit: 36 }
+        SquareIterator {
+            raw: 0,
+            limit: Self::count() as u8,
+        }
     }
 }
 
@@ -350,13 +429,17 @@ impl FromStr for Square {
             return Err(SquareStrError::WrongLength);
         }
 
+        let n = current_size();
+        let max_file = b'a' + n - 1;
+        let max_rank = b'1' + n - 1;
+
         let file = bytes[0];
-        if !(b'a'..=b'f').contains(&file) {
+        if !(b'a'..=max_file).contains(&file) {
             return Err(SquareStrError::InvalidFile);
         }
 
         let rank = bytes[1];
-        if !(b'1'..=b'6').contains(&rank) {
+        if !(b'1'..=max_rank).contains(&rank) {
             return Err(SquareStrError::InvalidRank);
         }
 

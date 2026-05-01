@@ -125,7 +125,7 @@ impl Move {
     }
 
     #[must_use]
-    pub const fn spread_dest(self) -> Square {
+    pub fn spread_dest(self) -> Square {
         assert!(self.is_spread());
         let sq = self.sq();
         let dir = self.dir();

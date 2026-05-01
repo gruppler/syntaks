@@ -44,15 +44,19 @@ struct Data {
     table_size: usize,
 }
 
+const PEXT_SIZE: usize = 6;
+const PEXT_SQ_COUNT: usize = PEXT_SIZE * PEXT_SIZE;
+
 const SQUARE_DATA: Data = {
     let mut squares = [SquareData::new(); Square::MAX_COUNT];
     let mut table_size = 0;
 
-    let mut idx = 0;
-    while let Some(sq) = Square::from_raw(idx) {
+    let mut idx: u8 = 0;
+    while (idx as usize) < PEXT_SQ_COUNT {
+        let sq = Square::from_raw(idx).unwrap();
         let square_data = &mut squares[sq.idx()];
 
-        square_data.mask = generate_mask(sq);
+        square_data.mask = generate_mask(sq, PEXT_SIZE);
 
         square_data.offset = table_size;
         table_size += 1 << square_data.mask.count_ones();

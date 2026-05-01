@@ -30,26 +30,128 @@ pub struct Bitboard {
 }
 
 impl Bitboard {
-    const MASK: u64 = (1 << Square::MAX_COUNT) - 1;
+    /// Runtime bit-mask covering valid squares for the current board size.
+    #[must_use]
+    #[inline]
+    pub fn current_mask() -> u64 {
+        (1u64 << current_size_sq()) - 1
+    }
 
-    pub const UPPER_EDGE: Self = Self::from_raw(0xfc0000000);
-    pub const LOWER_EDGE: Self = Self::from_raw(0x3f);
-    pub const LEFT_EDGE: Self = Self::from_raw(0x41041041);
-    pub const RIGHT_EDGE: Self = Self::from_raw(0x820820820);
+    /// Compile-time mask for a specific board size. Useful for per-size
+    /// const tables.
+    #[must_use]
+    pub const fn mask_for(n: usize) -> u64 {
+        if n >= 64 { u64::MAX } else { (1u64 << (n * n)) - 1 }
+    }
+
+    #[must_use]
+    pub fn upper_edge() -> Self {
+        let n = current_size() as u32;
+        // top rank: bits N*(N-1) .. N*N - 1
+        let raw = ((1u64 << n) - 1) << (n * (n - 1));
+        Self { raw }
+    }
+
+    #[must_use]
+    pub fn lower_edge() -> Self {
+        let n = current_size() as u32;
+        Self { raw: (1u64 << n) - 1 }
+    }
+
+    #[must_use]
+    pub fn left_edge() -> Self {
+        let n = current_size() as u32;
+        let mut raw = 0u64;
+        let mut i = 0;
+        while i < n {
+            raw |= 1u64 << (i * n);
+            i += 1;
+        }
+        Self { raw }
+    }
+
+    #[must_use]
+    pub fn right_edge() -> Self {
+        let n = current_size() as u32;
+        let mut raw = 0u64;
+        let mut i = 0;
+        while i < n {
+            raw |= 1u64 << (i * n + n - 1);
+            i += 1;
+        }
+        Self { raw }
+    }
+
+    /// Const edge masks for a specific board size.
+    #[must_use]
+    pub const fn upper_edge_const(n: u32) -> Self {
+        let raw = ((1u64 << n) - 1) << (n * (n - 1));
+        Self { raw }
+    }
+
+    #[must_use]
+    pub const fn lower_edge_const(n: u32) -> Self {
+        Self { raw: (1u64 << n) - 1 }
+    }
+
+    #[must_use]
+    pub const fn left_edge_const(n: u32) -> Self {
+        let mut raw = 0u64;
+        let mut i = 0;
+        while i < n {
+            raw |= 1u64 << (i * n);
+            i += 1;
+        }
+        Self { raw }
+    }
+
+    #[must_use]
+    pub const fn right_edge_const(n: u32) -> Self {
+        let mut raw = 0u64;
+        let mut i = 0;
+        while i < n {
+            raw |= 1u64 << (i * n + n - 1);
+            i += 1;
+        }
+        Self { raw }
+    }
 
     #[must_use]
     pub const fn empty() -> Self {
         Self { raw: 0 }
     }
 
+    /// Construct a bitboard, masking off bits outside the current board size.
     #[must_use]
-    pub const fn from_raw(raw: u64) -> Self {
-        Self { raw: raw & Self::MASK }
+    pub fn from_raw(raw: u64) -> Self {
+        Self { raw: raw & Self::current_mask() }
+    }
+
+    /// Const constructor that does not apply any size mask. Callers must
+    /// ensure no bits outside the active board are set.
+    #[must_use]
+    pub const fn from_raw_unmasked(raw: u64) -> Self {
+        Self { raw }
     }
 
     #[must_use]
-    pub const fn edge(dir: Direction) -> Self {
-        [Self::UPPER_EDGE, Self::LOWER_EDGE, Self::LEFT_EDGE, Self::RIGHT_EDGE][dir.idx()]
+    pub fn edge(dir: Direction) -> Self {
+        match dir {
+            Direction::Up => Self::upper_edge(),
+            Direction::Down => Self::lower_edge(),
+            Direction::Left => Self::left_edge(),
+            Direction::Right => Self::right_edge(),
+        }
+    }
+
+    #[must_use]
+    pub const fn edge_const(dir: Direction, n: u32) -> Self {
+        match dir {
+            Direction::Up => Self::upper_edge_const(n),
+            Direction::Down => Self::lower_edge_const(n),
+            Direction::Left => Self::left_edge_const(n),
+            Direction::Right => Self::right_edge_const(n),
+        }
     }
 
     #[must_use]
@@ -64,46 +166,54 @@ impl Bitboard {
 
     #[must_use]
     pub const fn has_sq(self, sq: Square) -> bool {
-        (self.raw & sq.bb().raw) != 0
+        (self.raw & sq.bb_const().raw) != 0
     }
 
     #[must_use]
     pub const fn with_sq(self, sq: Square) -> Self {
         Self {
-            raw: self.raw | sq.bb().raw,
+            raw: self.raw | sq.bb_const().raw,
         }
     }
 
     #[must_use]
     pub const fn without_sq(self, sq: Square) -> Self {
         Self {
-            raw: self.raw & !sq.bb().raw,
+            raw: self.raw & !sq.bb_const().raw,
         }
     }
 
     #[must_use]
     pub const fn with_sq_toggled(self, sq: Square) -> Self {
         Self {
-            raw: self.raw ^ sq.bb().raw,
+            raw: self.raw ^ sq.bb_const().raw,
         }
     }
 
     pub const fn set_sq(&mut self, sq: Square) {
-        self.raw |= sq.bb().raw;
+        self.raw |= sq.bb_const().raw;
     }
 
     pub const fn clear_sq(&mut self, sq: Square) {
-        self.raw &= !sq.bb().raw;
+        self.raw &= !sq.bb_const().raw;
     }
 
     pub const fn toggle_sq(&mut self, sq: Square) {
-        self.raw ^= sq.bb().raw;
+        self.raw ^= sq.bb_const().raw;
     }
 
     #[must_use]
-    pub const fn cmpl(self) -> Self {
+    pub fn cmpl(self) -> Self {
         Self {
-            raw: !self.raw & Self::MASK,
+            raw: !self.raw & Self::current_mask(),
+        }
+    }
+
+    /// Const variant of [`cmpl`] that takes board size explicitly.
+    #[must_use]
+    pub const fn cmpl_const(self, n: usize) -> Self {
+        Self {
+            raw: !self.raw & Self::mask_for(n),
         }
     }
 
@@ -134,9 +244,16 @@ impl Bitboard {
     }
 
     #[must_use]
-    pub const fn shl(self, count: u32) -> Self {
+    pub fn shl(self, count: u32) -> Self {
         Self {
-            raw: (self.raw << count) & Self::MASK,
+            raw: (self.raw << count) & Self::current_mask(),
+        }
+    }
+
+    #[must_use]
+    pub const fn shl_const(self, count: u32, n: usize) -> Self {
+        Self {
+            raw: (self.raw << count) & Self::mask_for(n),
         }
     }
 
@@ -161,12 +278,24 @@ impl Bitboard {
     }
 
     #[must_use]
-    pub const fn shift(self, dir: Direction) -> Self {
+    pub fn shift(self, dir: Direction) -> Self {
         match dir {
             Direction::Up => self.shl(dir.offset() as u32),
             Direction::Down => self.shr(-dir.offset() as u32),
-            Direction::Left => self.and(Self::LEFT_EDGE.cmpl()).shr(-dir.offset() as u32),
-            Direction::Right => self.and(Self::RIGHT_EDGE.cmpl()).shl(dir.offset() as u32),
+            Direction::Left => self.and(Self::left_edge().cmpl()).shr(1),
+            Direction::Right => self.and(Self::right_edge().cmpl()).shl(1),
+        }
+    }
+
+    /// Const variant of [`shift`] that takes board size explicitly.
+    #[must_use]
+    pub const fn shift_const(self, dir: Direction, n: usize) -> Self {
+        let n_u32 = n as u32;
+        match dir {
+            Direction::Up => self.shl_const(n_u32, n),
+            Direction::Down => self.shr(n_u32),
+            Direction::Left => self.and(Self::left_edge_const(n_u32).cmpl_const(n)).shr(1),
+            Direction::Right => self.and(Self::right_edge_const(n_u32).cmpl_const(n)).shl_const(1, n),
         }
     }
 }

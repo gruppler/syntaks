@@ -28,13 +28,22 @@ use crate::board::Position;
 use crate::core::{Direction, Piece, PieceType, Player, Square};
 use crate::search::Score;
 
+// Eval tables are currently 6x6-only. Multi-size eval is a follow-up.
+const EVAL_SIZE: usize = 6;
+const EVAL_SQ_COUNT: usize = EVAL_SIZE * EVAL_SIZE;
+
 #[static_init::dynamic]
 static RINGS: [Bitboard; 5] = {
-    let mut covered = Bitboard::from_raw(1 << 14 | 1 << 15 | 1 << 20 | 1 << 21);
+    let mut covered = Bitboard::from_raw_unmasked(1 << 14 | 1 << 15 | 1 << 20 | 1 << 21);
     let mut curr = covered;
     array::from_fn(|_| {
         let r = curr;
-        curr = (curr << 6 | curr >> 6 | curr << 1 | curr >> 1) & !covered;
+        let n = EVAL_SIZE;
+        curr = (curr.shl_const(n as u32, n)
+            | curr.shr(n as u32)
+            | curr.shl_const(1, n)
+            | curr.shr(1))
+            & !covered;
         covered |= curr;
         r
     })
@@ -43,14 +52,15 @@ static RINGS: [Bitboard; 5] = {
 const ADJACENT_MASKS: [Bitboard; Square::MAX_COUNT] = {
     let mut masks = [Bitboard::empty(); Square::MAX_COUNT];
 
-    let mut sq_idx = 0;
-    while let Some(sq) = Square::from_raw(sq_idx) {
-        let bb = sq.bb();
+    let mut sq_idx: u8 = 0;
+    while (sq_idx as usize) < EVAL_SQ_COUNT {
+        let sq = Square::from_raw(sq_idx).unwrap();
+        let bb = sq.bb_const();
         let bb = bb
-            .shift(Direction::Up)
-            .or(bb.shift(Direction::Down))
-            .or(bb.shift(Direction::Left))
-            .or(bb.shift(Direction::Right));
+            .shift_const(Direction::Up, EVAL_SIZE)
+            .or(bb.shift_const(Direction::Down, EVAL_SIZE))
+            .or(bb.shift_const(Direction::Left, EVAL_SIZE))
+            .or(bb.shift_const(Direction::Right, EVAL_SIZE));
         masks[sq.idx()] = bb;
         sq_idx += 1;
     }
@@ -58,15 +68,22 @@ const ADJACENT_MASKS: [Bitboard; Square::MAX_COUNT] = {
     masks
 };
 
+// 6x6-specific PSQT; entries 36..49 are unused placeholders.
 #[rustfmt::skip]
-const CAP_PSQT: [Score; Square::MAX_COUNT] = [
-    -20,  -5,  -5,  -5,  -5, -20,
-     -5,  10,  18,  18,  10,  -5,
-     -5,  18,  35,  35,  18,  -5,
-     -5,  18,  35,  35,  18,  -5,
-     -5,  10,  18,  18,  10,  -5,
-    -20,  -5,  -5,  -5,  -5, -20,
-];
+const CAP_PSQT: [Score; Square::MAX_COUNT] = {
+    let mut t = [0 as Score; Square::MAX_COUNT];
+    let src: [Score; 36] = [
+        -20,  -5,  -5,  -5,  -5, -20,
+         -5,  10,  18,  18,  10,  -5,
+         -5,  18,  35,  35,  18,  -5,
+         -5,  18,  35,  35,  18,  -5,
+         -5,  10,  18,  18,  10,  -5,
+        -20,  -5,  -5,  -5,  -5, -20,
+    ];
+    let mut i = 0;
+    while i < 36 { t[i] = src[i]; i += 1; }
+    t
+};
 
 #[must_use]
 fn static_eval_player(pos: &Position, player: Player, komi: u32) -> Score {

@@ -30,8 +30,8 @@ pub(super) fn has_road(road_occ: u64, up: u64, down: u64, left: u64, right: u64)
     let mut masks_ul = _mm_set_epi64x(up as i64, left as i64);
     let mut masks_dr = _mm_set_epi64x(down as i64, right as i64);
 
-    let left_edge = _mm_set1_epi64x(Bitboard::LEFT_EDGE.raw() as i64);
-    let right_edge = _mm_set1_epi64x(Bitboard::RIGHT_EDGE.raw() as i64);
+    let left_edge = _mm_set1_epi64x(Bitboard::left_edge_const(6).raw() as i64);
+    let right_edge = _mm_set1_epi64x(Bitboard::right_edge_const(6).raw() as i64);
 
     let road_occ = _mm_set1_epi64x(road_occ as i64);
 

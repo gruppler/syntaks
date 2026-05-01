@@ -31,10 +31,11 @@ use crate::bitboard::Bitboard;
 
 #[must_use]
 pub fn has_road(road_occ: Bitboard) -> bool {
-    let upper_edge = Bitboard::UPPER_EDGE.raw();
-    let lower_edge = Bitboard::LOWER_EDGE.raw();
-    let left_edge = Bitboard::LEFT_EDGE.raw();
-    let right_edge = Bitboard::RIGHT_EDGE.raw();
+    let n = crate::core::current_size() as u32;
+    let upper_edge = Bitboard::upper_edge().raw();
+    let lower_edge = Bitboard::lower_edge().raw();
+    let left_edge = Bitboard::left_edge().raw();
+    let right_edge = Bitboard::right_edge().raw();
 
     let road_occ = road_occ.raw();
 
@@ -43,21 +44,55 @@ pub fn has_road(road_occ: Bitboard) -> bool {
     let left = road_occ & left_edge;
     let right = road_occ & right_edge;
 
-    let up = up | (up >> 6 & road_occ);
-    let down = down | (down << 6 & road_occ);
+    let up = up | (up >> n & road_occ);
+    let down = down | (down << n & road_occ);
     let left = left | (left << 1 & road_occ);
     let right = right | (right >> 1 & road_occ);
 
     #[cfg(target_feature = "avx2")]
-    {
-        //SAFETY: self-explanatory
+    if n == 6 {
+        // SAFETY: AVX2 path is hardcoded for 6x6 stride.
         return unsafe { avx2::has_road(road_occ, up, down, left, right) };
     }
 
     #[cfg(all(not(target_feature = "avx2"), target_feature = "sse4.2"))]
-    {
+    if n == 6 {
         return unsafe { sse::has_road(road_occ, up, down, left, right) };
     }
 
-    todo!();
+    has_road_scalar(n, road_occ, up, down, left, right, left_edge, right_edge)
+}
+
+#[must_use]
+fn has_road_scalar(
+    n: u32,
+    road_occ: u64,
+    mut up: u64,
+    mut down: u64,
+    mut left: u64,
+    mut right: u64,
+    left_edge: u64,
+    right_edge: u64,
+) -> bool {
+    loop {
+        let next_up = (up << n | up >> n | (up & !left_edge) >> 1 | (up & !right_edge) << 1) & road_occ;
+        let next_down = (down << n | down >> n | (down & !left_edge) >> 1 | (down & !right_edge) << 1) & road_occ;
+        let next_left = (left << n | left >> n | (left & !left_edge) >> 1 | (left & !right_edge) << 1) & road_occ;
+        let next_right = (right << n | right >> n | (right & !left_edge) >> 1 | (right & !right_edge) << 1) & road_occ;
+
+        if (next_up & next_down) != 0 || (next_left & next_right) != 0 {
+            return true;
+        }
+
+        let progressed =
+            (next_up & !up) | (next_down & !down) | (next_left & !left) | (next_right & !right);
+        if progressed == 0 {
+            return false;
+        }
+
+        up = next_up;
+        down = next_down;
+        left = next_left;
+        right = next_right;
+    }
 }

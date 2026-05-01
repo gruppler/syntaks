@@ -25,7 +25,7 @@ use crate::bitboard::Bitboard;
 use crate::core::{Direction, Square};
 use std::arch::x86_64::_pdep_u64;
 
-pub(super) const fn generate_mask(sq: Square) -> u64 {
+pub(super) const fn generate_mask(sq: Square, n: usize) -> u64 {
     let mut mask = Bitboard::empty();
 
     let mut dir_idx = 0;
@@ -34,12 +34,12 @@ pub(super) const fn generate_mask(sq: Square) -> u64 {
 
         let mut sq = sq;
 
-        while let Some(shifted) = sq.shift_checked(dir) {
+        while let Some(shifted) = sq.shift_checked_const(dir, n as u32) {
             dir_bb.set_sq(shifted);
             sq = shifted;
         }
 
-        mask = mask.or(dir_bb.and(Bitboard::edge(dir).cmpl()));
+        mask = mask.or(dir_bb.and(Bitboard::edge_const(dir, n as u32).cmpl_const(n)));
 
         dir_idx += 1;
     }
