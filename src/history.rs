@@ -123,7 +123,7 @@ struct ConthistTable {
 impl ConthistTable {
     // one for each placement type, and 4 spread directions
     const MOVE_TYPES: usize = PieceType::COUNT + Direction::COUNT;
-    const ENTRIES: usize = Self::MOVE_TYPES * Square::COUNT;
+    const ENTRIES: usize = Self::MOVE_TYPES * Square::MAX_COUNT;
 
     #[must_use]
     fn move_idx(mv: Move) -> usize {
@@ -132,7 +132,7 @@ impl ConthistTable {
         } else {
             mv.pt().idx() + Direction::COUNT
         };
-        type_idx * Square::COUNT + mv.sq().idx()
+        type_idx * Square::MAX_COUNT + mv.sq().idx()
     }
 
     fn clear(&mut self) {

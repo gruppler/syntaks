@@ -88,9 +88,9 @@ impl Keys {
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct Stacks {
-    players: [u64; Square::COUNT],
-    heights: [u8; Square::COUNT],
-    tops: [Option<PieceType>; Square::COUNT],
+    players: [u64; Square::MAX_COUNT],
+    heights: [u8; Square::MAX_COUNT],
+    tops: [Option<PieceType>; Square::MAX_COUNT],
     keys: Keys,
 }
 
@@ -205,9 +205,9 @@ impl Stacks {
 impl Default for Stacks {
     fn default() -> Self {
         Self {
-            players: [u64::default(); Square::COUNT],
-            heights: [u8::default(); Square::COUNT],
-            tops: [None; Square::COUNT],
+            players: [u64::default(); Square::MAX_COUNT],
+            heights: [u8::default(); Square::MAX_COUNT],
+            tops: [None; Square::MAX_COUNT],
             keys: Default::default(),
         }
     }
@@ -769,7 +769,7 @@ impl Position {
         self.flats_in_hand.fill(30);
         self.caps_in_hand.fill(1);
 
-        for sq_idx in 0..Square::COUNT {
+        for sq_idx in 0..Square::MAX_COUNT {
             let sq = Square::from_raw(sq_idx as u8).unwrap();
 
             if self.stacks.is_empty(sq) {

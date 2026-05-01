@@ -27,7 +27,7 @@ use crate::hits::common::{generate_mask, pdep};
 use crate::hits::naive::find_hits_naive;
 
 #[rustfmt::skip]
-const MAGICS: [u64; Square::COUNT] = [
+const MAGICS: [u64; Square::MAX_COUNT] = [
     0x0200204004001181, 0x0101002001108a00, 0x0208081002804803, 0x0402240404000200, 0x0809088808000200, 0x2400402a20000220,
     0x0308004090000108, 0x0040c210003200c2, 0x1610402001080248, 0x00610201018a8000, 0x80204a0800000414, 0x2008010200211100,
     0x45002001488c0208, 0x0181101002501800, 0x1610402001080248, 0x1203040202044100, 0x0420410041830181, 0x0201800440020001,
@@ -37,7 +37,7 @@ const MAGICS: [u64; Square::COUNT] = [
 ];
 
 #[rustfmt::skip]
-const SHIFTS: [u32; Square::COUNT] = [
+const SHIFTS: [u32; Square::MAX_COUNT] = [
     56, 57, 57, 57, 57, 56,
     57, 58, 58, 58, 58, 57,
     57, 58, 58, 58, 58, 57,
@@ -59,12 +59,12 @@ impl SquareData {
 }
 
 struct Data {
-    squares: [SquareData; Square::COUNT],
+    squares: [SquareData; Square::MAX_COUNT],
     table_size: usize,
 }
 
 const SQUARE_DATA: Data = {
-    let mut squares = [SquareData::new(); Square::COUNT];
+    let mut squares = [SquareData::new(); Square::MAX_COUNT];
     let mut table_size = 0;
 
     let mut idx = 0;

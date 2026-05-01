@@ -40,12 +40,12 @@ impl SquareData {
 }
 
 struct Data {
-    squares: [SquareData; Square::COUNT],
+    squares: [SquareData; Square::MAX_COUNT],
     table_size: usize,
 }
 
 const SQUARE_DATA: Data = {
-    let mut squares = [SquareData::new(); Square::COUNT];
+    let mut squares = [SquareData::new(); Square::MAX_COUNT];
     let mut table_size = 0;
 
     let mut idx = 0;

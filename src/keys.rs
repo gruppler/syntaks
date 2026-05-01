@@ -68,8 +68,8 @@ impl Sfc64 {
 }
 
 const P2_COUNT: usize = 1;
-const TOP_COUNT: usize = PieceType::COUNT * Square::COUNT;
-const PLAYER_COUNT: usize = Stacks::MAX_HEIGHT * Player::COUNT * Square::COUNT;
+const TOP_COUNT: usize = PieceType::COUNT * Square::MAX_COUNT;
+const PLAYER_COUNT: usize = Stacks::MAX_HEIGHT * Player::COUNT * Square::MAX_COUNT;
 
 const TOTAL_COUNT: usize = P2_COUNT + TOP_COUNT + PLAYER_COUNT;
 

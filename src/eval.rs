@@ -40,8 +40,8 @@ static RINGS: [Bitboard; 5] = {
     })
 };
 
-const ADJACENT_MASKS: [Bitboard; Square::COUNT] = {
-    let mut masks = [Bitboard::empty(); Square::COUNT];
+const ADJACENT_MASKS: [Bitboard; Square::MAX_COUNT] = {
+    let mut masks = [Bitboard::empty(); Square::MAX_COUNT];
 
     let mut sq_idx = 0;
     while let Some(sq) = Square::from_raw(sq_idx) {
@@ -59,7 +59,7 @@ const ADJACENT_MASKS: [Bitboard; Square::COUNT] = {
 };
 
 #[rustfmt::skip]
-const CAP_PSQT: [Score; Square::COUNT] = [
+const CAP_PSQT: [Score; Square::MAX_COUNT] = [
     -20,  -5,  -5,  -5,  -5, -20,
      -5,  10,  18,  18,  10,  -5,
      -5,  18,  35,  35,  18,  -5,

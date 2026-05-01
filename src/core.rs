@@ -242,25 +242,21 @@ impl Display for Direction {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-#[repr(u8)]
-#[rustfmt::skip]
-pub enum Square {
-    A1, B1, C1, D1, E1, F1,
-    A2, B2, C2, D2, E2, F2,
-    A3, B3, C3, D3, E3, F3,
-    A4, B4, C4, D4, E4, F4,
-    A5, B5, C5, D5, E5, F5,
-    A6, B6, C6, D6, E6, F6,
-}
+pub struct Square(u8);
 
 impl Square {
-    pub const COUNT: usize = 36;
+    /// Compile-time bound on the number of squares. Currently 36 (6x6);
+    /// will widen to MAX_SQ (49 = 7x7) in a follow-up commit once the
+    /// per-size tables it sizes are runtime-keyed.
+    pub const MAX_COUNT: usize = 36;
+
+    /// Default square value, useful as an array-fill placeholder.
+    pub const A1: Self = Self(0);
 
     #[must_use]
     pub const fn from_raw(raw: u8) -> Option<Self> {
-        if (raw as usize) < Self::COUNT {
-            // SAFETY: we just bounds checked the value
-            Some(unsafe { std::mem::transmute::<u8, Square>(raw) })
+        if (raw as usize) < Self::MAX_COUNT {
+            Some(Self(raw))
         } else {
             None
         }
@@ -271,28 +267,28 @@ impl Square {
         if file >= 6 || rank >= 6 {
             None
         } else {
-            Some(Self::from_raw((rank as u8 * 6) + file as u8).unwrap())
+            Some(Self((rank as u8 * 6) + file as u8))
         }
     }
 
     #[must_use]
     pub const fn raw(self) -> u8 {
-        self as u8
+        self.0
     }
 
     #[must_use]
     pub const fn idx(self) -> usize {
-        self as usize
+        self.0 as usize
     }
 
     #[must_use]
     pub const fn rank(self) -> u32 {
-        self.raw() as u32 / 6
+        self.0 as u32 / 6
     }
 
     #[must_use]
     pub const fn file(self) -> u32 {
-        self.raw() as u32 % 6
+        self.0 as u32 % 6
     }
 
     #[must_use]
@@ -302,9 +298,9 @@ impl Square {
 
     #[must_use]
     pub const fn shift(self, dir: Direction) -> Option<Self> {
-        let shifted = self as i8 + dir.offset();
-        if shifted >= 0 && shifted < Self::COUNT as i8 {
-            Some(Self::from_raw(shifted as u8).unwrap())
+        let shifted = self.0 as i8 + dir.offset();
+        if shifted >= 0 && (shifted as usize) < 36 {
+            Some(Self(shifted as u8))
         } else {
             None
         }
@@ -321,7 +317,7 @@ impl Square {
 
     #[must_use]
     pub fn all() -> SquareIterator {
-        SquareIterator { raw: 0 }
+        SquareIterator { raw: 0, limit: 36 }
     }
 }
 
@@ -370,14 +366,18 @@ impl FromStr for Square {
 
 pub struct SquareIterator {
     raw: u8,
+    limit: u8,
 }
 
 impl Iterator for SquareIterator {
     type Item = Square;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let sq = Square::from_raw(self.raw);
+        if self.raw >= self.limit {
+            return None;
+        }
+        let sq = Square(self.raw);
         self.raw += 1;
-        sq
+        Some(sq)
     }
 }
