@@ -259,7 +259,14 @@ impl FromStr for Move {
         let mut pattern = 1u16;
         let mut bit = 1u16;
 
-        for &pattern_char in &bytes[next..] {
+        // Each drop char advances the cumulative bit position by that many
+        // pieces and ORs the bit into the pattern, marking "advance to next
+        // square after this many pieces dropped". The LAST drop must not
+        // contribute an advance bit — there's no square after the last drop
+        // — otherwise is_legal's count_ones-based distance check overcounts
+        // by 1 and rejects spreads that reach the exact board edge.
+        let drop_chars = &bytes[next..];
+        for (i, &pattern_char) in drop_chars.iter().enumerate() {
             let max_drop_char = b'0' + max_drop;
             if !(b'1'..=max_drop_char).contains(&pattern_char) {
                 return Err(MoveStrError::InvalidSpreadPattern);
@@ -268,7 +275,9 @@ impl FromStr for Move {
             let dropped = pattern_char - b'0';
 
             bit <<= dropped;
-            pattern |= bit;
+            if i + 1 < drop_chars.len() {
+                pattern |= bit;
+            }
         }
 
         pattern <<= carry_limit - taken;

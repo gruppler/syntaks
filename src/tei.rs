@@ -103,6 +103,7 @@ impl TeiHandler {
                 "d" => self.handle_d(),
                 "perft" => self.handle_perft(args),
                 "splitperft" => self.handle_splitperft(args),
+                "tinue" => self.handle_tinue(args),
                 "quit" => break,
                 unknown => eprintln!("Unknown command '{}'", unknown),
             }
@@ -570,6 +571,83 @@ impl TeiHandler {
         };
 
         split_perft(&self.pos, depth);
+    }
+
+    fn handle_tinue(&self, args: &[&str]) {
+        let mut limits = crate::tinue::Limits::default();
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "depth" => {
+                    i += 1;
+                    if let Some(v) = args.get(i).and_then(|s| s.parse().ok()) {
+                        limits.max_plies = v;
+                    } else {
+                        eprintln!("Invalid depth");
+                        return;
+                    }
+                }
+                "nodes" => {
+                    i += 1;
+                    if let Some(v) = args.get(i).and_then(|s| s.parse().ok()) {
+                        limits.max_nodes = v;
+                    } else {
+                        eprintln!("Invalid nodes");
+                        return;
+                    }
+                }
+                unknown => {
+                    eprintln!("Unknown tinue arg '{}'", unknown);
+                    return;
+                }
+            }
+            i += 1;
+        }
+
+        let start = std::time::Instant::now();
+        let (result, stats) = crate::tinue::solve(&self.pos, &limits);
+        let elapsed = start.elapsed();
+
+        match result {
+            crate::tinue::TinueResult::Tinue { plies, pv } => {
+                let pv_str: Vec<String> = pv.iter().map(|m| m.to_string()).collect();
+                println!(
+                    "info tinue plies {} nodes {} time {} pv {}",
+                    plies,
+                    stats.nodes,
+                    elapsed.as_millis(),
+                    pv_str.join(" ")
+                );
+                println!("result tinue {}", plies);
+            }
+            crate::tinue::TinueResult::NoTinue { searched_plies } => {
+                println!(
+                    "info searched_plies {} nodes {} time {}",
+                    searched_plies,
+                    stats.nodes,
+                    elapsed.as_millis()
+                );
+                println!("result no_tinue {}", searched_plies);
+            }
+            crate::tinue::TinueResult::Aborted {
+                reason,
+                searched_plies,
+            } => {
+                println!(
+                    "info searched_plies {} nodes {} time {}",
+                    searched_plies,
+                    stats.nodes,
+                    elapsed.as_millis()
+                );
+                let reason_str = match reason {
+                    crate::tinue::AbortReason::Cancelled => "cancelled",
+                    crate::tinue::AbortReason::Nodes => "nodes",
+                    crate::tinue::AbortReason::Depth => "depth",
+                };
+                println!("result aborted {} {}", reason_str, searched_plies);
+            }
+        }
     }
 }
 

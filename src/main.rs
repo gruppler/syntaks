@@ -39,6 +39,7 @@ mod search;
 mod takmove;
 mod tei;
 mod thread;
+mod tinue;
 mod ttable;
 mod util;
 
