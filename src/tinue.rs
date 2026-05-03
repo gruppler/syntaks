@@ -370,6 +370,125 @@ fn order_defender_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player)
     });
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::Position;
+    use crate::core::SIZE;
+    use std::sync::atomic::Ordering;
+
+    fn parse(tps: &str, size: u8) -> Position {
+        SIZE.store(size, Ordering::Release);
+        let parts: Vec<&str> = tps.split_whitespace().collect();
+        Position::from_tps_parts(&parts).expect("valid tps")
+    }
+
+    fn assert_tinue(tps: &str, size: u8, expected_plies: u32, max_plies: u32) {
+        let pos = parse(tps, size);
+        let limits = Limits {
+            max_plies,
+            ..Default::default()
+        };
+        let (result, _stats) = solve(&pos, &limits);
+        match result {
+            TinueResult::Tinue { plies, pv } => {
+                assert!(
+                    plies <= expected_plies,
+                    "expected ≤ {} plies, got {} (pv: {:?})",
+                    expected_plies,
+                    plies,
+                    pv
+                );
+                assert_eq!(plies % 2, 1, "tinue plies must be odd");
+            }
+            other => panic!("expected tinue, got {:?}", other),
+        }
+    }
+
+    fn assert_no_tinue(tps: &str, size: u8, max_plies: u32) {
+        let pos = parse(tps, size);
+        let limits = Limits {
+            max_plies,
+            ..Default::default()
+        };
+        let (result, _) = solve(&pos, &limits);
+        assert!(
+            matches!(result, TinueResult::NoTinue { .. }),
+            "expected NoTinue, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn mate_in_one_5x5() {
+        // P1 has 4 flats on rank 1; placing on e1 (any piece) completes the road.
+        assert_tinue("x5/x5/x5/x5/1,1,1,1,x 1 5", 5, 1, 1);
+    }
+
+    #[test]
+    fn mate_in_one_6x6() {
+        assert_tinue("x6/x6/x6/x6/x6/1,1,1,1,1,x 1 6", 6, 1, 1);
+    }
+
+    #[test]
+    fn mate_in_one_7x7() {
+        assert_tinue("x7/x7/x7/x7/x7/x7/1,1,1,1,1,1,x 1 7", 7, 1, 1);
+    }
+
+    #[test]
+    fn alion_5x5_tinue() {
+        // 5x5 Tinuë Pattern.ptn — P2 to move, mate-in-5
+        assert_tinue(
+            "1,x3,2/2,1C,x2,2/1,1,x2,2/x,1,2C,2,2/x2,1,1,1 2 8",
+            5,
+            5,
+            5,
+        );
+    }
+
+    #[test]
+    fn alion_6x6_puzzle1() {
+        // Alion's Puzzle #1 (Tinuë).ptn — P2 to move, mate-in-7
+        assert_tinue(
+            "2,1221122,1,1,1,2S/1,1,1,x,1C,1111212/x2,2,212,2C,11/2,2,x2,1,1/x3,1,1,x/x2,2,21,x,112S 2 32",
+            6,
+            7,
+            7,
+        );
+    }
+
+    #[test]
+    fn alion_6x6_puzzle2() {
+        // Alion's Puzzle #2 (Tinuë).ptn — P1 to move, mate-in-7
+        assert_tinue(
+            "2,212221C,2,2,2C,1/1,2,1,1,2,1/12,x,1S,2S,2,1/2,2,2,x2,1/1,2212121S,2,12,1,1S/x,2,2,2,x,1 1 30",
+            6,
+            7,
+            7,
+        );
+    }
+
+    #[test]
+    fn empty_5x5_no_tinue() {
+        // Almost-empty board: nobody is close to a road.
+        assert_no_tinue("x5/x5/x5/x5/2,1,x3 1 2", 5, 5);
+    }
+
+    #[test]
+    fn parse_spread_to_board_edge() {
+        // Regression: parsing "3c3-12" used to be rejected as illegal because
+        // the parser added a phantom advance bit at the cumulative drop
+        // position, overcounting count_ones() by 1 — which made is_legal
+        // refuse spreads reaching the exact board edge.
+        let pos = parse(
+            "x2,1,21,2,2/1,2,21,1,21,2/1S,2,2,2C,2,2/21S,1,121C,x,1,12/2,2,121,1,1,1/2,x,12,x2,22S 1 28",
+            6,
+        );
+        let mv: Move = "3c3-12".parse().expect("parse");
+        assert!(pos.is_legal(mv), "3c3-12 should be legal here");
+    }
+}
+
 /// Solve for a tinue at `pos` from the side-to-move's perspective. Iteratively
 /// deepens over odd ply counts (1, 3, 5, ...) up to `limits.max_plies`.
 pub fn solve<'a>(pos: &Position, limits: &Limits<'a>) -> (TinueResult, Stats) {
