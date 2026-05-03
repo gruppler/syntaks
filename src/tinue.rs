@@ -33,8 +33,9 @@
 //! flat-count wins, draws by piece exhaustion, and any heuristic eval are
 //! ignored. The attacker proves a forced road; the defender disproves it.
 
+use crate::bitboard::Bitboard;
 use crate::board::{FlatCountOutcome, Position};
-use crate::core::Player;
+use crate::core::{Direction, Player};
 use crate::movegen::generate_moves;
 use crate::takmove::Move;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -390,6 +391,19 @@ impl<'a> Searcher<'a> {
             return NodeOutcome::DefenderHolds;
         }
 
+        // Drop defender moves that can't affect the road race. Always keep
+        // the TT move regardless — a prior search proved it's worth trying.
+        // If pruning would empty the list, fall back to the unfiltered set
+        // (defender may still have a non-obvious refutation we don't want
+        // to silently discard).
+        if let Some(zone) = defender_relevance_zone(pos, self.attacker) {
+            let before = moves.len();
+            moves.retain(|&m| Some(m) == tt_move || defender_move_in_zone(m, zone));
+            if moves.is_empty() && before > 0 {
+                generate_moves(&mut moves, pos);
+            }
+        }
+
         order_defender_moves(pos, &mut moves, self.attacker);
         if let Some(tt_mv) = tt_move
             && let Some(idx) = moves.iter().position(|&m| m == tt_mv)
@@ -494,6 +508,41 @@ impl<'a> Searcher<'a> {
                 NodeOutcome::DefenderHolds
             }
         }
+    }
+}
+
+/// Squares that any plausible defensive (or counter-offensive) move must
+/// touch: attacker's road-piece bitboard + defender's road-piece bitboard
+/// expanded by one orthogonal step. Moves whose source (spread) and target
+/// (placement / spread destination) all fall outside this zone cannot
+/// affect the imminent road race, so we prune them. Returns `None` if the
+/// attacker has no road pieces at all — in that case the position can't be
+/// a tinue and the caller should skip filtering (the search will conclude
+/// DefenderHolds quickly anyway, but we prefer not to introduce a soundness
+/// hazard here).
+fn defender_relevance_zone(pos: &Position, attacker: Player) -> Option<Bitboard> {
+    let attacker_roads = pos.roads(attacker);
+    if attacker_roads.is_empty() {
+        return None;
+    }
+    let defender_roads = pos.roads(attacker.flip());
+    let core = attacker_roads | defender_roads;
+    let neighbors = core.shift(Direction::Up)
+        | core.shift(Direction::Down)
+        | core.shift(Direction::Left)
+        | core.shift(Direction::Right);
+    Some(core | neighbors)
+}
+
+/// Returns true iff the move plausibly affects the road race per the
+/// [`defender_relevance_zone`]. Placements: target square in zone. Spreads:
+/// source or final destination in zone (covers blocks/disrupts and
+/// own-road-extension via spread).
+fn defender_move_in_zone(mv: Move, zone: Bitboard) -> bool {
+    if mv.is_spread() {
+        zone.has_sq(mv.sq()) || zone.has_sq(mv.spread_dest())
+    } else {
+        zone.has_sq(mv.sq())
     }
 }
 
