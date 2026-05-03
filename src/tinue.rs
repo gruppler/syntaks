@@ -39,6 +39,76 @@ use crate::movegen::generate_moves;
 use crate::takmove::Move;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+const TT_DEFAULT_BITS: u32 = 20;
+
+const TT_FLAG_NOWIN: u16 = 0x4000;
+const TT_FLAG_WIN: u16 = 0x8000;
+const TT_FLAG_MASK: u16 = 0xC000;
+const TT_VALUE_MASK: u16 = 0x3FFF;
+
+#[derive(Copy, Clone, Default)]
+struct TtEntry {
+    key: u64,
+    // top 2 bits: 00=empty, 01=NoWin, 10=Win. low 14 bits: plies (Win) or
+    // searched depth (NoWin).
+    flags: u16,
+    best_move: u16,
+}
+
+struct Tt {
+    entries: Vec<TtEntry>,
+    mask: usize,
+}
+
+impl Tt {
+    fn new(bits: u32) -> Self {
+        let size = 1usize << bits;
+        Self {
+            entries: vec![TtEntry::default(); size],
+            mask: size - 1,
+        }
+    }
+
+    fn idx(&self, key: u64) -> usize {
+        (key as usize) & self.mask
+    }
+
+    fn probe(&self, key: u64) -> Option<TtEntry> {
+        let e = self.entries[self.idx(key)];
+        if e.key == key && (e.flags & TT_FLAG_MASK) != 0 {
+            Some(e)
+        } else {
+            None
+        }
+    }
+
+    fn store_win(&mut self, key: u64, plies: u32, best_move: u16) {
+        let idx = self.idx(key);
+        let plies = (plies.min(TT_VALUE_MASK as u32)) as u16;
+        self.entries[idx] = TtEntry {
+            key,
+            flags: TT_FLAG_WIN | plies,
+            best_move,
+        };
+    }
+
+    fn store_nowin(&mut self, key: u64, depth: u32, best_move: u16) {
+        let idx = self.idx(key);
+        let existing = self.entries[idx];
+        // Never demote a Win to a NoWin: Win is a finished proof regardless
+        // of depth, NoWin is only valid up to the depth searched.
+        if existing.key == key && (existing.flags & TT_FLAG_WIN) != 0 {
+            return;
+        }
+        let depth = (depth.min(TT_VALUE_MASK as u32)) as u16;
+        self.entries[idx] = TtEntry {
+            key,
+            flags: TT_FLAG_NOWIN | depth,
+            best_move,
+        };
+    }
+}
+
 /// Result of a tinue search.
 #[derive(Clone, Debug)]
 pub enum TinueResult {
@@ -92,6 +162,7 @@ struct Searcher<'a> {
     node_limit: u64,
     cancel: Option<&'a AtomicBool>,
     aborted: bool,
+    tt: Tt,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -113,6 +184,7 @@ impl<'a> Searcher<'a> {
             node_limit: limits.max_nodes,
             cancel: limits.cancel,
             aborted: false,
+            tt: Tt::new(TT_DEFAULT_BITS),
         }
     }
 
@@ -138,6 +210,39 @@ impl<'a> Searcher<'a> {
         self.nodes.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Walk the TT from `pos`, replaying each cell's stored best_move, until
+    /// `pv` reaches `target_len`, the chain breaks, or a road appears.
+    fn extend_pv_via_tt(&self, pos: &Position, pv: &mut Vec<Move>, target_len: usize) {
+        let mut cur = pos.clone();
+        for &mv in pv.iter() {
+            if !cur.is_legal(mv) {
+                return;
+            }
+            cur = cur.apply_move(mv);
+            if cur.has_road(self.attacker) || cur.has_road(self.attacker.flip()) {
+                return;
+            }
+        }
+        while pv.len() < target_len {
+            let entry = match self.tt.probe(cur.key()) {
+                Some(e) => e,
+                None => return,
+            };
+            let mv = match Move::from_raw(entry.best_move) {
+                Some(m) => m,
+                None => return,
+            };
+            if !cur.is_legal(mv) {
+                return;
+            }
+            pv.push(mv);
+            cur = cur.apply_move(mv);
+            if cur.has_road(self.attacker) || cur.has_road(self.attacker.flip()) {
+                return;
+            }
+        }
+    }
+
     /// Attacker is to move at `pos`. Search up to `depth` plies. Returns
     /// AttackerWins(k) for the *first* forced win found (≤ depth), or
     /// DefenderHolds if no forced win is provable at this depth.
@@ -158,11 +263,35 @@ impl<'a> Searcher<'a> {
             return NodeOutcome::DefenderHolds;
         }
 
+        let key = pos.key();
+        let tt_hit = self.tt.probe(key);
+        let tt_move = tt_hit.and_then(|e| Move::from_raw(e.best_move));
+
+        if let Some(e) = tt_hit {
+            let value = (e.flags & TT_VALUE_MASK) as u32;
+            if (e.flags & TT_FLAG_WIN) != 0 {
+                if value <= depth {
+                    pv.clear();
+                    if let Some(mv) = tt_move {
+                        pv.push(mv);
+                    }
+                    return NodeOutcome::AttackerWins(value);
+                }
+            } else if value >= depth {
+                return NodeOutcome::DefenderHolds;
+            }
+        }
+
         self.bump_nodes();
 
         let mut moves = Vec::with_capacity(64);
         generate_moves(&mut moves, pos);
         order_attacker_moves(pos, &mut moves, self.attacker);
+        if let Some(tt_mv) = tt_move
+            && let Some(idx) = moves.iter().position(|&m| m == tt_mv)
+        {
+            moves.swap(0, idx);
+        }
 
         for &mv in &moves {
             let next = pos.apply_move(mv);
@@ -173,6 +302,7 @@ impl<'a> Searcher<'a> {
             if next.has_road(self.attacker) {
                 pv.clear();
                 pv.push(mv);
+                self.tt.store_win(key, 1, mv.raw());
                 return NodeOutcome::AttackerWins(1);
             }
 
@@ -195,6 +325,7 @@ impl<'a> Searcher<'a> {
                     pv.clear();
                     pv.push(mv);
                     pv.extend_from_slice(&sub_pv);
+                    self.tt.store_win(key, plies + 1, mv.raw());
                     return NodeOutcome::AttackerWins(plies + 1);
                 }
                 NodeOutcome::DefenderHolds => {}
@@ -202,6 +333,7 @@ impl<'a> Searcher<'a> {
             }
         }
 
+        self.tt.store_nowin(key, depth, 0);
         NodeOutcome::DefenderHolds
     }
 
@@ -226,6 +358,29 @@ impl<'a> Searcher<'a> {
             return NodeOutcome::DefenderHolds;
         }
 
+        let key = pos.key();
+        let tt_hit = self.tt.probe(key);
+        let tt_move = tt_hit.and_then(|e| Move::from_raw(e.best_move));
+
+        if let Some(e) = tt_hit {
+            let value = (e.flags & TT_VALUE_MASK) as u32;
+            if (e.flags & TT_FLAG_WIN) != 0 {
+                if value <= depth {
+                    pv.clear();
+                    if let Some(mv) = tt_move {
+                        pv.push(mv);
+                    }
+                    return NodeOutcome::AttackerWins(value);
+                }
+            } else if value >= depth {
+                pv.clear();
+                if let Some(mv) = tt_move {
+                    pv.push(mv);
+                }
+                return NodeOutcome::DefenderHolds;
+            }
+        }
+
         self.bump_nodes();
 
         let mut moves = Vec::with_capacity(64);
@@ -236,6 +391,11 @@ impl<'a> Searcher<'a> {
         }
 
         order_defender_moves(pos, &mut moves, self.attacker);
+        if let Some(tt_mv) = tt_move
+            && let Some(idx) = moves.iter().position(|&m| m == tt_mv)
+        {
+            moves.swap(0, idx);
+        }
 
         let mut longest: Option<(u32, Vec<Move>)> = None;
 
@@ -251,6 +411,7 @@ impl<'a> Searcher<'a> {
                 // achieve tinue from this branch.
                 pv.clear();
                 pv.push(mv);
+                self.tt.store_nowin(key, depth, mv.raw());
                 return NodeOutcome::DefenderHolds;
             }
 
@@ -277,12 +438,14 @@ impl<'a> Searcher<'a> {
                     // defender wins flat count — attacker loses
                     pv.clear();
                     pv.push(mv);
+                    self.tt.store_nowin(key, depth, mv.raw());
                     return NodeOutcome::DefenderHolds;
                 }
                 FlatCountOutcome::Draw => {
                     // a draw refutes tinue
                     pv.clear();
                     pv.push(mv);
+                    self.tt.store_nowin(key, depth, mv.raw());
                     return NodeOutcome::DefenderHolds;
                 }
                 FlatCountOutcome::Win(_) => {
@@ -290,6 +453,7 @@ impl<'a> Searcher<'a> {
                     // win, so this is also a refutation.
                     pv.clear();
                     pv.push(mv);
+                    self.tt.store_nowin(key, depth, mv.raw());
                     return NodeOutcome::DefenderHolds;
                 }
                 FlatCountOutcome::None => {}
@@ -311,6 +475,7 @@ impl<'a> Searcher<'a> {
                     // any single survival refutes tinue
                     pv.clear();
                     pv.push(mv);
+                    self.tt.store_nowin(key, depth, mv.raw());
                     return NodeOutcome::DefenderHolds;
                 }
                 NodeOutcome::Aborted => return NodeOutcome::Aborted,
@@ -319,10 +484,15 @@ impl<'a> Searcher<'a> {
 
         match longest {
             Some((plies, found_pv)) => {
+                let bm = found_pv.first().map(|m| m.raw()).unwrap_or(0);
+                self.tt.store_win(key, plies, bm);
                 *pv = found_pv;
                 NodeOutcome::AttackerWins(plies)
             }
-            None => NodeOutcome::DefenderHolds,
+            None => {
+                self.tt.store_nowin(key, depth, 0);
+                NodeOutcome::DefenderHolds
+            }
         }
     }
 }
@@ -474,6 +644,46 @@ mod tests {
         assert_no_tinue("x5/x5/x5/x5/2,1,x3 1 2", 5, 5);
     }
 
+    // Known-hard puzzles — ignored by default. Currently exceed practical
+    // wall time even with TT; will be revisited once defender-side move
+    // pruning (restrict to road-relevant moves) and threat extensions land.
+    // Run with: cargo test --release -- --ignored tinue::tests
+    #[test]
+    #[ignore]
+    fn alion_6x6_puzzle3() {
+        // Alion's Puzzle #3 (Tinuë).ptn — P1 to move
+        assert_tinue(
+            "x2,1,21,2,2/1,2,21,1,21,2/1S,2,2,2C,2,2/21S,1,121C,x,1,12/2,2,121,1,1,1/2,2,x3,22S 1 27",
+            6,
+            11,
+            11,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn morten_5s_tinue_2() {
+        // Morten 5s tinue #2.ptn — P1 to move
+        assert_tinue(
+            "2,2221S,2,x2/2,x,2,221S,2/x2,2,x2/12C,2,x,1,x/1221S,1,21121C,1,1 1 28",
+            5,
+            11,
+            11,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn gruppler_2025_03_10_puzzle1() {
+        // Gruppler's Tinue Puzzle 2025-03-10 #1.ptn — P1 to move
+        assert_tinue(
+            "x4,2,112/1,1,1,1,1212C,1121C/x,21,x,2,121,12/2,1,1,21,x2/x,2,2,x,1,2/2,2,x3,2 1 28",
+            6,
+            11,
+            11,
+        );
+    }
+
     #[test]
     fn parse_spread_to_board_edge() {
         // Regression: parsing "3c3-12" used to be rejected as illegal because
@@ -510,6 +720,10 @@ pub fn solve<'a>(pos: &Position, limits: &Limits<'a>) -> (TinueResult, Stats) {
                     nodes: searcher.nodes.load(Ordering::Relaxed),
                     max_depth_reached: depth,
                 };
+                // TT cutoffs can truncate the PV — extend by walking the
+                // chain of stored best_moves until we reach `plies` length
+                // or run out of entries.
+                searcher.extend_pv_via_tt(pos, &mut pv, plies as usize);
                 pv.truncate(plies as usize);
                 return (TinueResult::Tinue { plies, pv }, stats);
             }
