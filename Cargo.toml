@@ -3,10 +3,25 @@ name = "syntaks"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "syntaks"
+path = "src/main.rs"
+
 [features]
 pext = []
 
 [dependencies]
 arrayvec = "0.7.6"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 atomic-wait = "1.1.0"
 static_init = "1.0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"

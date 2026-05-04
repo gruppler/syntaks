@@ -23,6 +23,7 @@
 
 use crate::search::{Score, is_loss, is_win};
 use crate::takmove::Move;
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU64, Ordering};

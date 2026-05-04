@@ -30,7 +30,10 @@ mod naive;
 #[cfg(all(feature = "pext", target_feature = "bmi2"))]
 mod pext;
 
-#[cfg(not(all(feature = "pext", target_feature = "bmi2")))]
+#[cfg(all(
+    not(all(feature = "pext", target_feature = "bmi2")),
+    not(target_arch = "wasm32")
+))]
 mod magic;
 
 pub type Hit = (u8, Square);
@@ -52,7 +55,10 @@ pub fn find_hits(blockers: Bitboard, start: Square) -> Hits {
         pext::find_hits_pext(blockers, start)
     }
 
-    #[cfg(not(all(feature = "pext", target_feature = "bmi2")))]
+    #[cfg(all(
+        not(all(feature = "pext", target_feature = "bmi2")),
+        not(target_arch = "wasm32")
+    ))]
     {
         magic::find_hits_magic(blockers, start)
     }

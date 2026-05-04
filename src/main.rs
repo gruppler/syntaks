@@ -11,38 +11,8 @@
  *
  * The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
  */
 
-mod bitboard;
-mod board;
-mod core;
-mod correction;
-mod eval;
-mod history;
-mod hits;
-mod keys;
-mod limit;
-mod movegen;
-mod movepick;
-mod node_counter;
-mod perft;
-mod road;
-mod search;
-mod takmove;
-mod tei;
-mod thread;
-mod tinue;
-mod ttable;
-mod util;
-
 fn main() {
-    tei::run();
+    syntaks::tei::run();
 }

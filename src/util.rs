@@ -21,4 +21,5 @@
  * SOFTWARE.
  */
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod command_channel;
