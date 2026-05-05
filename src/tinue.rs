@@ -56,17 +56,26 @@ struct TtEntry {
     best_move: u16,
 }
 
-struct Tt {
+/// Transposition table for the tinue search. Reusable across calls — pass
+/// the same `Tt` to multiple `solve_with_tt` invocations to share the cache
+/// (e.g. when sweeping a whole game). Sized to `1 << bits` entries × 16 B.
+pub struct Tt {
     entries: Vec<TtEntry>,
     mask: usize,
 }
 
 impl Tt {
-    fn new(bits: u32) -> Self {
+    pub fn new(bits: u32) -> Self {
         let size = 1usize << bits;
         Self {
             entries: vec![TtEntry::default(); size],
             mask: size - 1,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for e in &mut self.entries {
+            *e = TtEntry::default();
         }
     }
 
@@ -157,13 +166,13 @@ pub struct Stats {
     pub max_depth_reached: u32,
 }
 
-struct Searcher<'a> {
+struct Searcher<'a, 'b> {
     attacker: Player,
     nodes: AtomicU64,
     node_limit: u64,
     cancel: Option<&'a AtomicBool>,
     aborted: bool,
-    tt: Tt,
+    tt: &'b mut Tt,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -177,15 +186,15 @@ enum NodeOutcome {
     Aborted,
 }
 
-impl<'a> Searcher<'a> {
-    fn new(attacker: Player, limits: &Limits<'a>) -> Self {
+impl<'a, 'b> Searcher<'a, 'b> {
+    fn new(attacker: Player, limits: &Limits<'a>, tt: &'b mut Tt) -> Self {
         Self {
             attacker,
             nodes: AtomicU64::new(0),
             node_limit: limits.max_nodes,
             cancel: limits.cancel,
             aborted: false,
-            tt: Tt::new(TT_DEFAULT_BITS),
+            tt,
         }
     }
 
@@ -748,11 +757,21 @@ mod tests {
     }
 }
 
-/// Solve for a tinue at `pos` from the side-to-move's perspective. Iteratively
-/// deepens over odd ply counts (1, 3, 5, ...) up to `limits.max_plies`.
+/// Solve for a tinue at `pos`. Allocates a fresh TT internally.
 pub fn solve<'a>(pos: &Position, limits: &Limits<'a>) -> (TinueResult, Stats) {
+    let mut tt = Tt::new(TT_DEFAULT_BITS);
+    solve_with_tt(pos, limits, &mut tt)
+}
+
+/// Solve for a tinue at `pos` reusing the caller's TT. Pass the same `tt` to
+/// successive calls (e.g. when sweeping a game) to share cached results.
+pub fn solve_with_tt<'a>(
+    pos: &Position,
+    limits: &Limits<'a>,
+    tt: &mut Tt,
+) -> (TinueResult, Stats) {
     let attacker = pos.stm();
-    let mut searcher = Searcher::new(attacker, limits);
+    let mut searcher = Searcher::new(attacker, limits, tt);
 
     let mut last_searched = 0u32;
     let mut depth = 1u32;
