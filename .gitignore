@@ -2,3 +2,4 @@
 /.idea
 /pkg
 /pkg-node
+/pkg-no-modules
