@@ -119,6 +119,26 @@ impl Tt {
     }
 }
 
+/// Per-search XOR mask that segregates TT entries by which player is the
+/// attacker. The position's Zobrist key already encodes whose turn it is, but
+/// stored Win/NoWin flags carry meaning relative to the SEARCHER'S attacker
+/// — not whose turn it is in the position. Two solves with different
+/// attackers can otherwise probe each other's entries (e.g. when sweeping
+/// backwards through a game with a shared TT) and read winning entries with
+/// the wrong winner. XORing this mask in before lookup keeps the namespaces
+/// separate. Top bit chosen because syntaks's Zobrist keys leave it
+/// unconstrained.
+const ATTACKER_KEY_MASK_P1: u64 = 0;
+const ATTACKER_KEY_MASK_P2: u64 = 1u64 << 63;
+
+#[inline]
+fn attacker_key_mask(attacker: Player) -> u64 {
+    match attacker {
+        Player::P1 => ATTACKER_KEY_MASK_P1,
+        Player::P2 => ATTACKER_KEY_MASK_P2,
+    }
+}
+
 /// Result of a tinue search.
 #[derive(Clone, Debug)]
 pub enum TinueResult {
@@ -168,6 +188,9 @@ pub struct Stats {
 
 struct Searcher<'a, 'b> {
     attacker: Player,
+    /// XOR'd into every TT key so entries are partitioned by attacker.
+    /// See [`attacker_key_mask`] for the rationale.
+    attacker_mask: u64,
     nodes: AtomicU64,
     node_limit: u64,
     cancel: Option<&'a AtomicBool>,
@@ -190,12 +213,18 @@ impl<'a, 'b> Searcher<'a, 'b> {
     fn new(attacker: Player, limits: &Limits<'a>, tt: &'b mut Tt) -> Self {
         Self {
             attacker,
+            attacker_mask: attacker_key_mask(attacker),
             nodes: AtomicU64::new(0),
             node_limit: limits.max_nodes,
             cancel: limits.cancel,
             aborted: false,
             tt,
         }
+    }
+
+    #[inline]
+    fn tt_key(&self, pos: &Position) -> u64 {
+        pos.key() ^ self.attacker_mask
     }
 
     fn check_abort(&mut self) -> bool {
@@ -234,7 +263,7 @@ impl<'a, 'b> Searcher<'a, 'b> {
             }
         }
         while pv.len() < target_len {
-            let entry = match self.tt.probe(cur.key()) {
+            let entry = match self.tt.probe(self.tt_key(&cur)) {
                 Some(e) => e,
                 None => return,
             };
@@ -273,7 +302,7 @@ impl<'a, 'b> Searcher<'a, 'b> {
             return NodeOutcome::DefenderHolds;
         }
 
-        let key = pos.key();
+        let key = self.tt_key(pos);
         let tt_hit = self.tt.probe(key);
         let tt_move = tt_hit.and_then(|e| Move::from_raw(e.best_move));
 
@@ -368,7 +397,7 @@ impl<'a, 'b> Searcher<'a, 'b> {
             return NodeOutcome::DefenderHolds;
         }
 
-        let key = pos.key();
+        let key = self.tt_key(pos);
         let tt_hit = self.tt.probe(key);
         let tt_move = tt_hit.and_then(|e| Move::from_raw(e.best_move));
 
