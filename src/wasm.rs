@@ -117,6 +117,11 @@ pub struct TinueSolver {
 impl TinueSolver {
     #[wasm_bindgen(constructor)]
     pub fn new(bits: u32) -> TinueSolver {
+        // Build the hits magic table now rather than during the first
+        // search. On wasm it's behind a `OnceLock` and would otherwise
+        // stall the initial query by tens of ms.
+        crate::hits::preload();
+
         let bits = bits.clamp(10, 28);
         TinueSolver {
             tt: Tt::new(bits),

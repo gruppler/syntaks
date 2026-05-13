@@ -30,10 +30,7 @@ mod naive;
 #[cfg(all(feature = "pext", target_feature = "bmi2"))]
 mod pext;
 
-#[cfg(all(
-    not(all(feature = "pext", target_feature = "bmi2")),
-    not(target_arch = "wasm32")
-))]
+#[cfg(not(all(feature = "pext", target_feature = "bmi2")))]
 mod magic;
 
 pub type Hit = (u8, Square);
@@ -55,11 +52,18 @@ pub fn find_hits(blockers: Bitboard, start: Square) -> Hits {
         pext::find_hits_pext(blockers, start)
     }
 
-    #[cfg(all(
-        not(all(feature = "pext", target_feature = "bmi2")),
-        not(target_arch = "wasm32")
-    ))]
+    #[cfg(not(all(feature = "pext", target_feature = "bmi2")))]
     {
         magic::find_hits_magic(blockers, start)
     }
+}
+
+/// Pre-populate any lazy lookup tables [`find_hits`] depends on. Native
+/// builds initialize them before main via `#[static_init::dynamic]`; the
+/// wasm build defers to a `OnceLock` and would otherwise stall on the
+/// first query while the multi-MB table is filled. Call this from the
+/// wasm constructor so the first search isn't slow.
+pub fn preload() {
+    #[cfg(not(all(feature = "pext", target_feature = "bmi2")))]
+    magic::preload();
 }

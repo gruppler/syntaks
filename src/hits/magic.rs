@@ -100,11 +100,42 @@ const SQUARE_DATA: Data = {
     Data { squares, table_size }
 };
 
+// Native uses `#[static_init::dynamic]` so the table is built before main
+// and lives in .data (zero per-access overhead). That crate has no wasm
+// support — its build chooses an initializer-section linkage per platform
+// and bails on `wasm32-unknown-unknown`. On wasm we lazy-init the same
+// data into a Vec via `OnceLock`; first call pays the build cost (~few MB
+// of writes), all subsequent calls are a load + branch.
+//
+// Both sides go through `hits_table()` below so callers don't care which
+// variant they're using.
+
+#[cfg(not(target_arch = "wasm32"))]
 #[static_init::dynamic]
-static HITS: [super::Hits; SQUARE_DATA.table_size] = {
+static HITS: [super::Hits; SQUARE_DATA.table_size] = build_hits_array();
+
+#[cfg(target_arch = "wasm32")]
+static HITS_CELL: std::sync::OnceLock<Vec<super::Hits>> = std::sync::OnceLock::new();
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn build_hits_array() -> [super::Hits; SQUARE_DATA.table_size] {
     let mut result = [[(0, Square::A1); Direction::COUNT]; SQUARE_DATA.table_size];
     let mut filled = [false; SQUARE_DATA.table_size];
+    fill_hits(&mut result, &mut filled);
+    result
+}
 
+#[cfg(target_arch = "wasm32")]
+fn build_hits_vec() -> Vec<super::Hits> {
+    let mut result = vec![[(0, Square::A1); Direction::COUNT]; SQUARE_DATA.table_size];
+    let mut filled = vec![false; SQUARE_DATA.table_size];
+    fill_hits(&mut result, &mut filled);
+    result
+}
+
+#[inline]
+fn fill_hits(result: &mut [super::Hits], filled: &mut [bool]) {
     for sq in Square::all() {
         let sq_data = &SQUARE_DATA.squares[sq.idx()];
 
@@ -127,9 +158,28 @@ static HITS: [super::Hits; SQUARE_DATA.table_size] = {
             filled[idx] = true;
         }
     }
+}
 
-    result
-};
+#[inline]
+fn hits_table() -> &'static [super::Hits] {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        &*HITS
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        HITS_CELL.get_or_init(build_hits_vec)
+    }
+}
+
+/// Force the magic tables to be built now. Native does this before main
+/// via `#[static_init::dynamic]`; on wasm the first hits query would
+/// otherwise stall to build a multi-MB lookup table. Callers that know
+/// they're about to start a search can call this to amortize the cost.
+#[inline]
+pub fn preload() {
+    let _ = hits_table();
+}
 
 #[must_use]
 fn calc_idx(blockers: Bitboard, inv_mask: u64, magic: u64, shift: u32) -> usize {
@@ -149,5 +199,5 @@ pub(super) fn find_hits_magic(blockers: Bitboard, start: Square) -> super::Hits 
     let sq_data = &SQUARE_DATA.squares[start.idx()];
 
     let idx = calc_idx(blockers, sq_data.inv_mask, magic, shift);
-    HITS[sq_data.offset + idx]
+    hits_table()[sq_data.offset + idx]
 }
