@@ -145,7 +145,18 @@ pub enum TinueResult {
     /// Forced road win in `plies` ply (always odd: attacker plays the last
     /// move). `pv` is one principal variation; non-PV defender moves also
     /// lose, but only the longest defense's continuation is recorded.
-    Tinue { plies: u32, pv: Vec<Move> },
+    ///
+    /// `winning_first_moves` lists every attacker move at the root that
+    /// leads to a proven forced road win at the same depth. Always contains
+    /// at least `pv[0]`. Populated when `Limits::find_all_winners` is set
+    /// (default true), allowing callers — e.g. an auto-annotator — to mark
+    /// every move that's "on the road to tinue" rather than only the
+    /// engine's first-found principal variation.
+    Tinue {
+        plies: u32,
+        pv: Vec<Move>,
+        winning_first_moves: Vec<Move>,
+    },
 
     /// No tinue exists within the depth limit. Either the attacker has no
     /// forced win up to `searched_plies` (proven), or the defender has a
@@ -168,6 +179,11 @@ pub struct Limits<'a> {
     pub max_plies: u32,
     pub max_nodes: u64,
     pub cancel: Option<&'a AtomicBool>,
+    /// When set, after proving a tinue the solver enumerates the remaining
+    /// root attacker moves to find any others that also win at the proven
+    /// depth. Cheap because the TT is hot from the primary search. The
+    /// extra winners (if any) land in `TinueResult::Tinue::winning_first_moves`.
+    pub find_all_winners: bool,
 }
 
 impl Default for Limits<'_> {
@@ -176,6 +192,7 @@ impl Default for Limits<'_> {
             max_plies: 21,
             max_nodes: u64::MAX,
             cancel: None,
+            find_all_winners: true,
         }
     }
 }
@@ -278,6 +295,54 @@ impl<'a, 'b> Searcher<'a, 'b> {
             cur = cur.apply_move(mv);
             if cur.has_road(self.attacker) || cur.has_road(self.attacker.flip()) {
                 return;
+            }
+        }
+    }
+
+    /// Enumerate every attacker root move (other than `primary`) that also
+    /// wins at the given depth. Appends to `winners` in move-generation
+    /// order. Soft-bounded by the existing search limits (node budget,
+    /// cancel flag) and stops early on abort. Run after a primary tinue
+    /// has been proven — the TT is hot, so non-winning moves cut fast and
+    /// other winners are TT hits.
+    fn collect_root_winners(
+        &mut self,
+        pos: &Position,
+        depth: u32,
+        primary: Move,
+        winners: &mut Vec<Move>,
+    ) {
+        let mut moves = Vec::with_capacity(64);
+        generate_moves(&mut moves, pos);
+
+        for &mv in &moves {
+            if mv == primary {
+                continue;
+            }
+            if self.check_abort() {
+                return;
+            }
+
+            let next = pos.apply_move(mv);
+
+            // Direct road completion.
+            if next.has_road(self.attacker) {
+                winners.push(mv);
+                continue;
+            }
+            // Suicide / flat-resolution branches are not winning candidates.
+            if next.has_road(self.attacker.flip()) {
+                continue;
+            }
+            if !matches!(next.count_flats(), FlatCountOutcome::None) {
+                continue;
+            }
+
+            let mut sub_pv = Vec::new();
+            match self.search_defender(&next, depth - 1, &mut sub_pv) {
+                NodeOutcome::AttackerWins(_) => winners.push(mv),
+                NodeOutcome::DefenderHolds => {}
+                NodeOutcome::Aborted => return,
             }
         }
     }
@@ -609,7 +674,7 @@ mod tests {
         };
         let (result, _stats) = solve(&pos, &limits);
         match result {
-            TinueResult::Tinue { plies, pv } => {
+            TinueResult::Tinue { plies, pv, .. } => {
                 assert!(
                     plies <= expected_plies,
                     "expected ≤ {} plies, got {} (pv: {:?})",
@@ -787,16 +852,38 @@ pub fn solve_with_tt<'a>(
 
         match outcome {
             NodeOutcome::AttackerWins(plies) => {
-                let stats = Stats {
-                    nodes: searcher.nodes.load(Ordering::Relaxed),
-                    max_depth_reached: depth,
-                };
                 // TT cutoffs can truncate the PV — extend by walking the
                 // chain of stored best_moves until we reach `plies` length
                 // or run out of entries.
                 searcher.extend_pv_via_tt(pos, &mut pv, plies as usize);
                 pv.truncate(plies as usize);
-                return (TinueResult::Tinue { plies, pv }, stats);
+
+                // Enumerate alternate root winners at the same depth so
+                // callers can mark every move that's on the road to tinue,
+                // not just the primary PV's first ply. Cheap: the TT is
+                // hot from the primary search, so non-winning moves get
+                // cut fast and any other proven winners are TT hits.
+                let mut winners = if pv.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![pv[0]]
+                };
+                if limits.find_all_winners && !pv.is_empty() {
+                    searcher.collect_root_winners(pos, depth, pv[0], &mut winners);
+                }
+
+                let stats = Stats {
+                    nodes: searcher.nodes.load(Ordering::Relaxed),
+                    max_depth_reached: depth,
+                };
+                return (
+                    TinueResult::Tinue {
+                        plies,
+                        pv,
+                        winning_first_moves: winners,
+                    },
+                    stats,
+                );
             }
             NodeOutcome::DefenderHolds => {}
             NodeOutcome::Aborted => {

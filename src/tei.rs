@@ -610,7 +610,7 @@ impl TeiHandler {
         let elapsed = start.elapsed();
 
         match result {
-            crate::tinue::TinueResult::Tinue { plies, pv } => {
+            crate::tinue::TinueResult::Tinue { plies, pv, .. } => {
                 let pv_str: Vec<String> = pv.iter().map(|m| m.to_string()).collect();
                 println!(
                     "info tinue plies {} nodes {} time {} pv {}",

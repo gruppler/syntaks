@@ -13,7 +13,14 @@ use wasm_bindgen::prelude::*;
 #[serde(tag = "kind")]
 enum SolveOutcome {
     #[serde(rename = "tinue")]
-    Tinue { plies: u32, pv: Vec<String> },
+    Tinue {
+        plies: u32,
+        pv: Vec<String>,
+        /// Every attacker move at the root that wins at `plies` depth.
+        /// Always contains `pv[0]`. Lets callers mark every winning move
+        /// played in any branch, not only the engine's preferred PV.
+        winning_first_moves: Vec<String>,
+    },
     #[serde(rename = "no_tinue")]
     NoTinue { searched_plies: u32 },
     #[serde(rename = "aborted")]
@@ -41,9 +48,17 @@ fn parse_max_nodes(max_nodes: f64) -> u64 {
 
 fn build_response(result: TinueResult, stats: tinue::Stats) -> SolveResponse {
     let outcome = match result {
-        TinueResult::Tinue { plies, pv } => SolveOutcome::Tinue {
+        TinueResult::Tinue {
+            plies,
+            pv,
+            winning_first_moves,
+        } => SolveOutcome::Tinue {
             plies,
             pv: pv.iter().map(|m| m.to_string()).collect(),
+            winning_first_moves: winning_first_moves
+                .iter()
+                .map(|m| m.to_string())
+                .collect(),
         },
         TinueResult::NoTinue { searched_plies } => SolveOutcome::NoTinue { searched_plies },
         TinueResult::Aborted {
