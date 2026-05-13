@@ -175,6 +175,7 @@ impl TinueSolver {
         size: u8,
         depth: u32,
         max_nodes: f64,
+        find_all_winners: bool,
     ) -> JsValue {
         let pos = match parse_position(tps, size) {
             Ok(p) => p,
@@ -183,6 +184,7 @@ impl TinueSolver {
         let limits = Limits {
             max_plies: depth,
             max_nodes: parse_max_nodes(max_nodes),
+            find_all_winners,
             ..Default::default()
         };
         let (result, stats) = tinue::solve_one_depth(&pos, depth, &mut self.tt, &limits);
