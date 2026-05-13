@@ -1,5 +1,14 @@
 [build]
 rustflags = ["-C", "target-cpu=native"]
 
+# Enable the post-MVP wasm features modern browsers ship:
+# - reference-types (required by wasm-bindgen 0.2.120)
+# - simd128 for 128-bit SIMD intrinsics (massive speedup for bitboard ops)
+# - bulk-memory for fast memory.copy / memory.fill
+# - nontrapping-fptoint for cheap float→int conversions
+# - sign-ext for native i32 sign-extension instructions
+# All are supported by current Chrome / Firefox / Safari.
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "target-feature=+reference-types"]
+rustflags = [
+  "-C", "target-feature=+reference-types,+simd128,+bulk-memory,+nontrapping-fptoint,+sign-ext",
+]

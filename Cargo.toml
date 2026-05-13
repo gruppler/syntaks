@@ -25,3 +25,12 @@ static_init = "1.0.4"
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
+
+# Release-profile tuning. Single codegen unit + fat LTO gives the optimizer
+# whole-program visibility; on wasm32 in particular this collapses many of
+# the abstraction layers (Bitboard, Position::apply_move, etc.) that the
+# default many-codegen-unit build leaves as unattributed indirect calls.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
