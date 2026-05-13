@@ -818,6 +818,89 @@ pub fn solve<'a>(pos: &Position, limits: &Limits<'a>) -> (TinueResult, Stats) {
     solve_with_tt(pos, limits, &mut tt)
 }
 
+/// Run exactly one root-level search at the given odd depth. Use this when
+/// you need to drive iterative deepening from outside (e.g., the wasm
+/// streaming path that posts a progress event per completed depth). The
+/// caller-supplied `tt` is shared across calls, so successive depths get
+/// the same warm-cache benefit as the internal iterative-deepening loop
+/// in [`solve_with_tt`].
+///
+/// Node budget in `limits.max_nodes` applies per-call (not cumulative),
+/// matching its semantics in [`solve_with_tt`] for a single depth.
+pub fn solve_one_depth<'a>(
+    pos: &Position,
+    depth: u32,
+    tt: &mut Tt,
+    limits: &Limits<'a>,
+) -> (TinueResult, Stats) {
+    let attacker = pos.stm();
+
+    // Terminal positions short-circuit identically to solve_with_tt.
+    if pos.has_road(attacker) || pos.has_road(attacker.flip()) {
+        return (
+            TinueResult::NoTinue { searched_plies: 0 },
+            Stats::default(),
+        );
+    }
+
+    let mut searcher = Searcher::new(attacker, limits, tt);
+    let mut pv = Vec::with_capacity(depth as usize);
+    let outcome = searcher.search_attacker(pos, depth, &mut pv);
+    let nodes = searcher.nodes.load(Ordering::Relaxed);
+
+    match outcome {
+        NodeOutcome::AttackerWins(plies) => {
+            searcher.extend_pv_via_tt(pos, &mut pv, plies as usize);
+            pv.truncate(plies as usize);
+            let mut winners = if pv.is_empty() {
+                Vec::new()
+            } else {
+                vec![pv[0]]
+            };
+            if limits.find_all_winners && !pv.is_empty() {
+                searcher.collect_root_winners(pos, depth, pv[0], &mut winners);
+            }
+            (
+                TinueResult::Tinue {
+                    plies,
+                    pv,
+                    winning_first_moves: winners,
+                },
+                Stats {
+                    nodes,
+                    max_depth_reached: depth,
+                },
+            )
+        }
+        NodeOutcome::DefenderHolds => (
+            TinueResult::NoTinue {
+                searched_plies: depth,
+            },
+            Stats {
+                nodes,
+                max_depth_reached: depth,
+            },
+        ),
+        NodeOutcome::Aborted => {
+            let reason = if nodes >= limits.max_nodes {
+                AbortReason::Nodes
+            } else {
+                AbortReason::Cancelled
+            };
+            (
+                TinueResult::Aborted {
+                    reason,
+                    searched_plies: 0,
+                },
+                Stats {
+                    nodes,
+                    max_depth_reached: depth,
+                },
+            )
+        }
+    }
+}
+
 /// Solve for a tinue at `pos` reusing the caller's TT. Pass the same `tt` to
 /// successive calls (e.g. when sweeping a game) to share cached results.
 pub fn solve_with_tt<'a>(

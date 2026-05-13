@@ -163,4 +163,29 @@ impl TinueSolver {
         let (result, stats) = tinue::solve_with_tt(&pos, &limits, &mut self.tt);
         to_jsvalue(build_response(result, stats))
     }
+
+    /// Run exactly one iteration at `depth` plies. Use repeatedly with
+    /// increasing odd depths to drive iterative deepening from JS so
+    /// per-depth progress can be surfaced to the UI. The TT survives
+    /// across calls, so earlier-depth work warms the cache for later
+    /// depths just as the internal iterative-deepening loop would.
+    pub fn solve_at_depth(
+        &mut self,
+        tps: &str,
+        size: u8,
+        depth: u32,
+        max_nodes: f64,
+    ) -> JsValue {
+        let pos = match parse_position(tps, size) {
+            Ok(p) => p,
+            Err(message) => return error_response(message),
+        };
+        let limits = Limits {
+            max_plies: depth,
+            max_nodes: parse_max_nodes(max_nodes),
+            ..Default::default()
+        };
+        let (result, stats) = tinue::solve_one_depth(&pos, depth, &mut self.tt, &limits);
+        to_jsvalue(build_response(result, stats))
+    }
 }
