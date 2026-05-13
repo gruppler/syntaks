@@ -761,6 +761,19 @@ pub fn solve_with_tt<'a>(
     tt: &mut Tt,
 ) -> (TinueResult, Stats) {
     let attacker = pos.stm();
+
+    // Terminal positions aren't "tinue" candidates — if a road already
+    // exists on the board (for either side), the game is over and there's
+    // no forced sequence to find. Reporting Tinue here would be wrong (the
+    // ply that finished the road would otherwise get a spurious tak/tinue
+    // mark when callers query the post-move TPS).
+    if pos.has_road(attacker) || pos.has_road(attacker.flip()) {
+        return (
+            TinueResult::NoTinue { searched_plies: 0 },
+            Stats::default(),
+        );
+    }
+
     let mut searcher = Searcher::new(attacker, limits, tt);
 
     let mut last_searched = 0u32;
