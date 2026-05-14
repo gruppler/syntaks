@@ -3,8 +3,8 @@
  */
 
 use crate::board::Position;
-use crate::core::SIZE;
-use crate::tinue::{self, AbortReason, Limits, TinueResult, Tt};
+use crate::core::{Player, SIZE};
+use crate::tinue::{self, AbortReason, FlatOutcome, Limits, MoveScoreKind, TinueResult, Tt};
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use wasm_bindgen::prelude::*;
@@ -76,6 +76,35 @@ fn build_response(result: TinueResult, stats: tinue::Stats) -> SolveResponse {
     SolveResponse {
         outcome,
         nodes: stats.nodes,
+    }
+}
+
+/// Per-legal-move verdict surfaced to JS by [`TinueSolver::score_moves`].
+/// Mirrors [`MoveScoreKind`] but flattened into `kind`-tagged JSON for
+/// direct UI consumption.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum MoveScoreEntryKind {
+    Win { plies: u32 },
+    Loss { plies: u32 },
+    NoWin { searched: u32 },
+    Flat { outcome: &'static str },
+    Unknown,
+}
+
+#[derive(Serialize)]
+struct MoveScoreEntry {
+    #[serde(rename = "move")]
+    mv: String,
+    #[serde(flatten)]
+    kind: MoveScoreEntryKind,
+}
+
+fn flat_outcome_str(outcome: FlatOutcome) -> &'static str {
+    match outcome {
+        FlatOutcome::AttackerWin => "win",
+        FlatOutcome::DefenderWin => "loss",
+        FlatOutcome::Draw => "draw",
     }
 }
 
@@ -189,5 +218,35 @@ impl TinueSolver {
         };
         let (result, stats) = tinue::solve_one_depth(&pos, depth, &mut self.tt, &limits);
         to_jsvalue(build_response(result, stats))
+    }
+
+    /// Score every legal move at `tps` against the warm TT from
+    /// `attacker`'s perspective (`attacker_p1 = true` → P1 is attacker).
+    /// Pure TT lookup — no fresh search. Run a `solve`/`solve_at_depth`
+    /// first to populate the TT; call this on every UI navigation tick.
+    /// Returns a `[{ move, kind, ... }]` array; see [`MoveScoreEntryKind`].
+    pub fn score_moves(&self, tps: &str, size: u8, attacker_p1: bool) -> JsValue {
+        let pos = match parse_position(tps, size) {
+            Ok(p) => p,
+            Err(message) => return error_response(message),
+        };
+        let attacker = if attacker_p1 { Player::P1 } else { Player::P2 };
+        let scores = tinue::score_moves(&pos, attacker, &self.tt);
+        let entries: Vec<MoveScoreEntry> = scores
+            .into_iter()
+            .map(|s| MoveScoreEntry {
+                mv: s.mv.to_string(),
+                kind: match s.kind {
+                    MoveScoreKind::Win { plies } => MoveScoreEntryKind::Win { plies },
+                    MoveScoreKind::Loss { plies } => MoveScoreEntryKind::Loss { plies },
+                    MoveScoreKind::NoWin { searched } => MoveScoreEntryKind::NoWin { searched },
+                    MoveScoreKind::Flat { outcome } => MoveScoreEntryKind::Flat {
+                        outcome: flat_outcome_str(outcome),
+                    },
+                    MoveScoreKind::Unknown => MoveScoreEntryKind::Unknown,
+                },
+            })
+            .collect();
+        serde_wasm_bindgen::to_value(&entries).unwrap_or(JsValue::NULL)
     }
 }

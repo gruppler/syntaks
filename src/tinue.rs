@@ -610,6 +610,134 @@ impl<'a, 'b> Searcher<'a, 'b> {
     }
 }
 
+/// Per-move status against a warm TT, used by the UI to colour every legal
+/// move in the displayed position with its tinue-relative verdict. See
+/// [`score_moves`].
+///
+/// `plies` counts from the *current* position (before the move is played),
+/// so `Win { plies: 1 }` means this move itself completes the road, and
+/// `Win { plies: 3 }` means a 3-ply forced sequence starting with this move.
+#[derive(Copy, Clone, Debug)]
+pub enum MoveScoreKind {
+    /// Attacker has a forced road win in `plies` ply from before this move.
+    Win { plies: u32 },
+    /// Attacker is forced to lose in `plies` ply. Only emitted when the
+    /// loss is provable from the move's immediate result (board-state road
+    /// or flat-count win for the defender) — TT NoWin entries are reported
+    /// as `NoWin` since they only prove absence of an attacker win at a
+    /// given depth, not a defender win.
+    Loss { plies: u32 },
+    /// Attacker has no forced win within `searched` plies from before this
+    /// move. The defender may still ultimately lose at greater depth.
+    NoWin { searched: u32 },
+    /// Game ends after this move by flat-count resolution.
+    Flat { outcome: FlatOutcome },
+    /// TT has no entry for the resulting position; status is unknown
+    /// without a fresh search.
+    Unknown,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FlatOutcome {
+    AttackerWin,
+    DefenderWin,
+    Draw,
+}
+
+#[derive(Clone, Debug)]
+pub struct MoveScore {
+    pub mv: Move,
+    pub kind: MoveScoreKind,
+}
+
+/// Score every legal move at `pos` against a warm TT, from `attacker`'s
+/// perspective. Pure TT lookup — no recursive search — so this is O(legal
+/// moves) and safe to call on every UI navigation tick. Moves whose
+/// resulting position isn't in the TT come back as `Unknown`; the caller
+/// can extend coverage with `solve_at_depth` and re-score.
+///
+/// `attacker` is explicit so the caller controls perspective independent
+/// of whose turn it is in `pos`. Typical usage during proof exploration:
+/// keep `attacker` fixed to whoever was proven to win the root puzzle and
+/// pass it on every `score_moves` call as the user navigates.
+pub fn score_moves(pos: &Position, attacker: Player, tt: &Tt) -> Vec<MoveScore> {
+    let stm = pos.stm();
+    let mask = attacker_key_mask(attacker);
+    let mut out = Vec::with_capacity(64);
+    let mut moves = Vec::with_capacity(64);
+    generate_moves(&mut moves, pos);
+
+    for mv in moves {
+        let next = pos.apply_move(mv);
+
+        // "Current player wins" rule: if the mover ended their turn with a
+        // road, they win — even if the opponent also has a road on the
+        // resulting board (e.g. a wall-smash exposed both at once).
+        if next.has_road(stm) {
+            let kind = if stm == attacker {
+                MoveScoreKind::Win { plies: 1 }
+            } else {
+                MoveScoreKind::Loss { plies: 1 }
+            };
+            out.push(MoveScore { mv, kind });
+            continue;
+        }
+        if next.has_road(stm.flip()) {
+            // Mover handed a road to their opponent.
+            let kind = if stm == attacker {
+                MoveScoreKind::Loss { plies: 1 }
+            } else {
+                MoveScoreKind::Win { plies: 1 }
+            };
+            out.push(MoveScore { mv, kind });
+            continue;
+        }
+
+        match next.count_flats() {
+            FlatCountOutcome::Win(p) => {
+                let outcome = if p == attacker {
+                    FlatOutcome::AttackerWin
+                } else {
+                    FlatOutcome::DefenderWin
+                };
+                out.push(MoveScore {
+                    mv,
+                    kind: MoveScoreKind::Flat { outcome },
+                });
+                continue;
+            }
+            FlatCountOutcome::Draw => {
+                out.push(MoveScore {
+                    mv,
+                    kind: MoveScoreKind::Flat {
+                        outcome: FlatOutcome::Draw,
+                    },
+                });
+                continue;
+            }
+            FlatCountOutcome::None => {}
+        }
+
+        let key = next.key() ^ mask;
+        let kind = match tt.probe(key) {
+            Some(e) => {
+                let v = (e.flags & TT_VALUE_MASK) as u32;
+                if (e.flags & TT_FLAG_WIN) != 0 {
+                    MoveScoreKind::Win { plies: v + 1 }
+                } else {
+                    // NoWin entry stores depth searched from the child's
+                    // POV; +1 to express the budget that included this move.
+                    MoveScoreKind::NoWin { searched: v + 1 }
+                }
+            }
+            None => MoveScoreKind::Unknown,
+        };
+        out.push(MoveScore { mv, kind });
+    }
+
+    out
+}
+
 /// Order attacker moves so that road-completing moves come first, then
 /// moves that create new road threats, then everything else. Cheap and
 /// drastically improves pruning.
@@ -795,6 +923,85 @@ mod tests {
             11,
             11,
         );
+    }
+
+    #[test]
+    fn score_moves_marks_winning_first_move() {
+        // Mate-in-one: P1 places on e1 to complete a rank-1 road. After
+        // solving, score_moves should report `Win { plies: 1 }` for that
+        // move and report the other empty squares as non-winning placements.
+        let pos = parse("x5/x5/x5/x5/1,1,1,1,x 1 5", 5);
+        let limits = Limits {
+            max_plies: 1,
+            ..Default::default()
+        };
+        let mut tt = Tt::new(TT_DEFAULT_BITS);
+        let (result, _) = solve_with_tt(&pos, &limits, &mut tt);
+        assert!(matches!(result, TinueResult::Tinue { plies: 1, .. }));
+
+        let scores = score_moves(&pos, Player::P1, &tt);
+        let win = scores
+            .iter()
+            .find(|s| s.mv.to_string() == "e1")
+            .expect("e1 in legal moves");
+        assert!(
+            matches!(win.kind, MoveScoreKind::Win { plies: 1 }),
+            "expected Win {{ plies: 1 }} for e1, got {:?}",
+            win.kind
+        );
+        // A flat placement on an unrelated square (e.g. a2) doesn't win
+        // immediately, and the post-position wasn't visited by the
+        // depth-1 search either — should be Unknown.
+        let other = scores
+            .iter()
+            .find(|s| s.mv.to_string() == "a2")
+            .expect("a2 in legal moves");
+        assert!(
+            matches!(other.kind, MoveScoreKind::Unknown),
+            "expected Unknown for a2, got {:?}",
+            other.kind
+        );
+    }
+
+    #[test]
+    fn score_moves_marks_all_root_winners_after_solve() {
+        // After solving Alion's 5x5 mate-in-5 with find_all_winners on,
+        // every reported winning_first_move should also show up in
+        // score_moves as a `Win` entry — they share the same TT lookup
+        // path, so this guards against the JSON shape diverging from the
+        // TT semantics.
+        let pos = parse(
+            "1,x3,2/2,1C,x2,2/1,1,x2,2/x,1,2C,2,2/x2,1,1,1 2 8",
+            5,
+        );
+        let limits = Limits {
+            max_plies: 5,
+            ..Default::default()
+        };
+        let mut tt = Tt::new(TT_DEFAULT_BITS);
+        let (result, _) = solve_with_tt(&pos, &limits, &mut tt);
+        let winners = match result {
+            TinueResult::Tinue {
+                winning_first_moves,
+                ..
+            } => winning_first_moves,
+            other => panic!("expected tinue, got {:?}", other),
+        };
+        assert!(!winners.is_empty());
+
+        let scores = score_moves(&pos, Player::P2, &tt);
+        for w in &winners {
+            let entry = scores
+                .iter()
+                .find(|s| s.mv == *w)
+                .unwrap_or_else(|| panic!("winner {} missing from score_moves", w));
+            assert!(
+                matches!(entry.kind, MoveScoreKind::Win { .. }),
+                "winner {} scored as {:?}, expected Win",
+                w,
+                entry.kind
+            );
+        }
     }
 
     #[test]
