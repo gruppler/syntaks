@@ -738,45 +738,49 @@ pub fn score_moves(pos: &Position, attacker: Player, tt: &Tt) -> Vec<MoveScore> 
     out
 }
 
-/// Order attacker moves so that road-completing moves come first, then
-/// moves that create new road threats, then everything else. Cheap and
-/// drastically improves pruning.
+/// Order attacker moves by likely tinue value. Tiers are separated by
+/// large gaps so a move in one tier always beats every move in a worse
+/// tier regardless of secondary signals.
+///
+/// Tiers (lowest rank = tried first):
+///   -1000             — immediate road win
+///    -10×Δroad_pop    — moves that add ≥1 piece to the road bitboard
+///                       (spreads revealing multiple flats outrank flat
+///                       placements; placements outrank wall placements
+///                       which add 0)
+///     100             — spreads that don't grow the road bitboard
+///                       (still tactical; can reposition / capture)
+///     200             — wall placements
 fn order_attacker_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player) {
+    let before_road_pop = pos.roads(attacker).popcount() as i32;
     moves.sort_by_cached_key(|&mv| {
         let after = pos.apply_move(mv);
-        // 0: road win
         if after.has_road(attacker) {
-            return 0i32;
+            return -1000i32;
         }
-        // 1: a move that brings attacker closer to road completion (more
-        //    pieces in the road bitboard than before is a coarse proxy).
-        let before_road_pop = pos.roads(attacker).popcount() as i32;
-        let after_road_pop = after.roads(attacker).popcount() as i32;
-        if after_road_pop > before_road_pop {
-            return 1 - (after_road_pop - before_road_pop);
+        let delta = after.roads(attacker).popcount() as i32 - before_road_pop;
+        if delta > 0 {
+            return -10 * delta;
         }
-        // 2: spreads (typically tactical) before placements.
         if mv.is_spread() { 100 } else { 200 }
     });
 }
 
-/// Order defender moves by likely defensive value: moves that drop the
-/// attacker's road bitboard population, blocks adjacent to attacker road
-/// pieces, and walls/caps before flats.
+/// Order defender moves by likely defensive value. Same tier structure as
+/// the attacker ordering — defender's own road wins first (refutes the
+/// tinue outright), then moves that strip attacker road pieces (sliding
+/// off a stack, smashing under a cap), then spreads, then placements.
 fn order_defender_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player) {
     let attacker_road_before = pos.roads(attacker).popcount() as i32;
     moves.sort_by_cached_key(|&mv| {
         let after = pos.apply_move(mv);
-        // 0: defender wins (own road)
         if after.has_road(attacker.flip()) {
-            return 0i32;
+            return -1000i32;
         }
-        // 1: reduces attacker's road population (block / capture)
-        let attacker_road_after = after.roads(attacker).popcount() as i32;
-        if attacker_road_after < attacker_road_before {
-            return 10 - (attacker_road_before - attacker_road_after);
+        let stripped = attacker_road_before - after.roads(attacker).popcount() as i32;
+        if stripped > 0 {
+            return -10 * stripped;
         }
-        // 2: spreads before placements
         if mv.is_spread() { 100 } else { 200 }
     });
 }
