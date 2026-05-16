@@ -27,6 +27,9 @@ mod avx2;
 #[cfg(all(not(target_feature = "avx2"), target_feature = "sse4.2"))]
 mod sse;
 
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wasm_simd;
+
 use crate::bitboard::Bitboard;
 
 #[must_use]
@@ -58,6 +61,11 @@ pub fn has_road(road_occ: Bitboard) -> bool {
     #[cfg(all(not(target_feature = "avx2"), target_feature = "sse4.2"))]
     if n == 6 {
         return unsafe { sse::has_road(road_occ, up, down, left, right) };
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if n == 6 {
+        return wasm_simd::has_road(road_occ, up, down, left, right);
     }
 
     has_road_scalar(n, road_occ, up, down, left, right, left_edge, right_edge)
