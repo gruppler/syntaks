@@ -6,8 +6,19 @@ use crate::board::Position;
 use crate::core::{Player, SIZE};
 use crate::tinue::{self, AbortReason, FlatOutcome, Limits, MoveScoreKind, TinueResult, Tt};
 use serde::Serialize;
+use serde_wasm_bindgen::Serializer;
 use std::sync::atomic::Ordering;
 use wasm_bindgen::prelude::*;
+
+// serde_wasm_bindgen defaults to emitting JS `Map` for serde struct/map
+// types — including any struct that uses `#[serde(flatten)]`, which
+// forces the map serializer because the field set isn't static at
+// compile time. We want plain JS objects so consumers can read
+// `entry.move` / `entry.kind` directly.
+fn to_js<T: Serialize>(value: &T) -> JsValue {
+    let ser = Serializer::new().serialize_maps_as_objects(true);
+    value.serialize(&ser).unwrap_or(JsValue::NULL)
+}
 
 #[derive(Serialize)]
 #[serde(tag = "kind")]
@@ -118,7 +129,7 @@ fn parse_position(tps: &str, size: u8) -> Result<Position, String> {
 }
 
 fn to_jsvalue(response: SolveResponse) -> JsValue {
-    serde_wasm_bindgen::to_value(&response).unwrap_or(JsValue::NULL)
+    to_js(&response)
 }
 
 fn error_response(message: String) -> JsValue {
@@ -247,6 +258,6 @@ impl TinueSolver {
                 },
             })
             .collect();
-        serde_wasm_bindgen::to_value(&entries).unwrap_or(JsValue::NULL)
+        to_js(&entries)
     }
 }
