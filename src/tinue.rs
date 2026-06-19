@@ -791,15 +791,29 @@ mod tests {
     use crate::board::Position;
     use crate::core::SIZE;
     use std::sync::atomic::Ordering;
+    use std::sync::{Mutex, MutexGuard};
 
-    fn parse(tps: &str, size: u8) -> Position {
+    /// Serializes tests that mutate the process-global board [`SIZE`]. cargo's
+    /// default parallel test runner would otherwise let one test's `SIZE.store`
+    /// land mid-solve in another, corrupting board geometry and the spread
+    /// pattern decode (whose bit positions are relative to the board size).
+    /// Poison-tolerant so a panicking assert in one test doesn't cascade into
+    /// spurious lock failures elsewhere.
+    static SIZE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Parse a TPS string at `size`, returning the position together with a
+    /// guard that pins the global size for the caller's scope. Bind the guard
+    /// (`let (pos, _guard) = parse(..)`) so it lives through the whole test.
+    #[must_use]
+    fn parse(tps: &str, size: u8) -> (Position, MutexGuard<'static, ()>) {
+        let guard = SIZE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         SIZE.store(size, Ordering::Release);
         let parts: Vec<&str> = tps.split_whitespace().collect();
-        Position::from_tps_parts(&parts).expect("valid tps")
+        (Position::from_tps_parts(&parts).expect("valid tps"), guard)
     }
 
     fn assert_tinue(tps: &str, size: u8, expected_plies: u32, max_plies: u32) {
-        let pos = parse(tps, size);
+        let (pos, _guard) = parse(tps, size);
         let limits = Limits {
             max_plies,
             ..Default::default()
@@ -821,7 +835,7 @@ mod tests {
     }
 
     fn assert_no_tinue(tps: &str, size: u8, max_plies: u32) {
-        let pos = parse(tps, size);
+        let (pos, _guard) = parse(tps, size);
         let limits = Limits {
             max_plies,
             ..Default::default()
@@ -934,7 +948,7 @@ mod tests {
         // Mate-in-one: P1 places on e1 to complete a rank-1 road. After
         // solving, score_moves should report `Win { plies: 1 }` for that
         // move and report the other empty squares as non-winning placements.
-        let pos = parse("x5/x5/x5/x5/1,1,1,1,x 1 5", 5);
+        let (pos, _guard) = parse("x5/x5/x5/x5/1,1,1,1,x 1 5", 5);
         let limits = Limits {
             max_plies: 1,
             ..Default::default()
@@ -974,7 +988,7 @@ mod tests {
         // score_moves as a `Win` entry — they share the same TT lookup
         // path, so this guards against the JSON shape diverging from the
         // TT semantics.
-        let pos = parse(
+        let (pos, _guard) = parse(
             "1,x3,2/2,1C,x2,2/1,1,x2,2/x,1,2C,2,2/x2,1,1,1 2 8",
             5,
         );
@@ -1014,7 +1028,7 @@ mod tests {
         // the parser added a phantom advance bit at the cumulative drop
         // position, overcounting count_ones() by 1 — which made is_legal
         // refuse spreads reaching the exact board edge.
-        let pos = parse(
+        let (pos, _guard) = parse(
             "x2,1,21,2,2/1,2,21,1,21,2/1S,2,2,2C,2,2/21S,1,121C,x,1,12/2,2,121,1,1,1/2,x,12,x2,22S 1 28",
             6,
         );
