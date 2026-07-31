@@ -944,6 +944,22 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn archvenison_2026_05_24() {
+        // "archvenison 24-05-26" (PlayTak, 2026-05-24) — P1 to move.
+        // A *non-tak-chain* (gap) tinue: the forced win passes through a quiet
+        // non-threatening move, so a tak-chain-only solver (e.g. Topaz) reports
+        // no_tinue. syntaks's full-width search finds it. Confirmed mate-in-9
+        // (unassisted solve: 8.5M nodes, ~8 min).
+        assert_tinue(
+            "1,122121S,1,1,1/x,2S,1S,1,1/12,x4/2,2,x,221C,2S/2,2,2,12C,1S 1 24",
+            5,
+            9,
+            9,
+        );
+    }
+
+    #[test]
     fn score_moves_marks_winning_first_move() {
         // Mate-in-one: P1 places on e1 to complete a rank-1 road. After
         // solving, score_moves should report `Win { plies: 1 }` for that
