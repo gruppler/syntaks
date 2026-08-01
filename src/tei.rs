@@ -597,6 +597,16 @@ impl TeiHandler {
                         return;
                     }
                 }
+                "scope" => {
+                    i += 1;
+                    match args.get(i).map(|s| s.parse()) {
+                        Some(Ok(v)) => limits.scope = v,
+                        _ => {
+                            eprintln!("Invalid scope (expected 'full' or 'tak-chain')");
+                            return;
+                        }
+                    }
+                }
                 unknown => {
                     eprintln!("Unknown tinue arg '{}'", unknown);
                     return;

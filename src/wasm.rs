@@ -4,7 +4,9 @@
 
 use crate::board::Position;
 use crate::core::{Player, SIZE};
-use crate::tinue::{self, AbortReason, FlatOutcome, Limits, MoveScoreKind, TinueResult, Tt};
+use crate::tinue::{
+    self, AbortReason, FlatOutcome, Limits, MoveScoreKind, TinueResult, TinueScope, Tt,
+};
 use serde::Serialize;
 use serde_wasm_bindgen::Serializer;
 use std::sync::atomic::Ordering;
@@ -119,6 +121,28 @@ fn flat_outcome_str(outcome: FlatOutcome) -> &'static str {
     }
 }
 
+/// Map the JS `scope` argument onto [`TinueScope`]. `undefined`/`null` and
+/// the empty string mean `full`, so callers written before the scope toggle
+/// existed keep the complete (gap-tinue-finding) semantics they had.
+fn parse_scope(scope: Option<String>) -> Result<TinueScope, String> {
+    match scope.as_deref().map(str::trim) {
+        None | Some("") => Ok(TinueScope::Full),
+        Some(s) => s
+            .parse()
+            .map_err(|_| format!("unknown scope {:?} (expected \"full\" or \"tak-chain\")", s)),
+    }
+}
+
+/// A negative or non-finite margin disables the sweep pre-filter, matching
+/// how `max_nodes` treats out-of-range values.
+fn parse_prefilter_margin(margin: f64) -> Option<u32> {
+    if margin < 0.0 || !margin.is_finite() {
+        None
+    } else {
+        Some(margin.min(u32::MAX as f64) as u32)
+    }
+}
+
 fn parse_position(tps: &str, size: u8) -> Result<Position, String> {
     if !(5..=7).contains(&size) {
         return Err(format!("unsupported size {} (only 5/6/7)", size));
@@ -144,15 +168,31 @@ fn error_response(message: String) -> JsValue {
 ///
 /// `max_plies` caps iterative deepening; `max_nodes` is a node budget (0 / NaN
 /// / negative = no cap). Returns `{ outcome: { kind, ... }, nodes }`.
+///
+/// `scope` is `"full"` (default when omitted) or `"tak-chain"`. Under
+/// `"tak-chain"` a `no_tinue` outcome means **no tak-chain tinue** — a gap
+/// tinue may still exist — so the UI must label it as such rather than
+/// claiming the position is not tinue.
 #[wasm_bindgen]
-pub fn solve_tinue(tps: &str, size: u8, max_plies: u32, max_nodes: f64) -> JsValue {
+pub fn solve_tinue(
+    tps: &str,
+    size: u8,
+    max_plies: u32,
+    max_nodes: f64,
+    scope: Option<String>,
+) -> JsValue {
     let pos = match parse_position(tps, size) {
         Ok(p) => p,
+        Err(message) => return error_response(message),
+    };
+    let scope = match parse_scope(scope) {
+        Ok(s) => s,
         Err(message) => return error_response(message),
     };
     let limits = Limits {
         max_plies,
         max_nodes: parse_max_nodes(max_nodes),
+        scope,
         ..Default::default()
     };
     let (result, stats) = tinue::solve(&pos, &limits);
@@ -190,14 +230,39 @@ impl TinueSolver {
 
     /// Solve a position reusing this solver's TT. Same return shape as the
     /// free `solve_tinue` function.
-    pub fn solve(&mut self, tps: &str, size: u8, max_plies: u32, max_nodes: f64) -> JsValue {
+    ///
+    /// `prefilter_margin` enables the **sweep-only** road-distance skip: a
+    /// position whose attacker is further than `ceil(max_plies/2) + margin`
+    /// squares from any road is reported `no_tinue` without searching.
+    /// Negative (the default for callers that omit it as `-1`) disables it.
+    /// It is a heuristic and can in principle skip a real tinue — pass it
+    /// only from a full-game sweep, never from an explicit single-position
+    /// check.
+    ///
+    /// Entries stored under different `scope` values live in separate TT
+    /// namespaces, so flipping the scope mid-sweep is safe.
+    pub fn solve(
+        &mut self,
+        tps: &str,
+        size: u8,
+        max_plies: u32,
+        max_nodes: f64,
+        scope: Option<String>,
+        prefilter_margin: f64,
+    ) -> JsValue {
         let pos = match parse_position(tps, size) {
             Ok(p) => p,
+            Err(message) => return error_response(message),
+        };
+        let scope = match parse_scope(scope) {
+            Ok(s) => s,
             Err(message) => return error_response(message),
         };
         let limits = Limits {
             max_plies,
             max_nodes: parse_max_nodes(max_nodes),
+            scope,
+            prefilter_margin: parse_prefilter_margin(prefilter_margin),
             ..Default::default()
         };
         let (result, stats) = tinue::solve_with_tt(&pos, &limits, &mut self.tt);
@@ -216,15 +281,21 @@ impl TinueSolver {
         depth: u32,
         max_nodes: f64,
         find_all_winners: bool,
+        scope: Option<String>,
     ) -> JsValue {
         let pos = match parse_position(tps, size) {
             Ok(p) => p,
+            Err(message) => return error_response(message),
+        };
+        let scope = match parse_scope(scope) {
+            Ok(s) => s,
             Err(message) => return error_response(message),
         };
         let limits = Limits {
             max_plies: depth,
             max_nodes: parse_max_nodes(max_nodes),
             find_all_winners,
+            scope,
             ..Default::default()
         };
         let (result, stats) = tinue::solve_one_depth(&pos, depth, &mut self.tt, &limits);
@@ -236,13 +307,27 @@ impl TinueSolver {
     /// Pure TT lookup — no fresh search. Run a `solve`/`solve_at_depth`
     /// first to populate the TT; call this on every UI navigation tick.
     /// Returns a `[{ move, kind, ... }]` array; see [`MoveScoreEntryKind`].
-    pub fn score_moves(&self, tps: &str, size: u8, attacker_p1: bool) -> JsValue {
+    ///
+    /// Pass the same `scope` the populating solve used — verdicts are stored
+    /// per scope, so a mismatch yields `unknown` for every move rather than
+    /// another scope's answers.
+    pub fn score_moves(
+        &self,
+        tps: &str,
+        size: u8,
+        attacker_p1: bool,
+        scope: Option<String>,
+    ) -> JsValue {
         let pos = match parse_position(tps, size) {
             Ok(p) => p,
             Err(message) => return error_response(message),
         };
+        let scope = match parse_scope(scope) {
+            Ok(s) => s,
+            Err(message) => return error_response(message),
+        };
         let attacker = if attacker_p1 { Player::P1 } else { Player::P2 };
-        let scores = tinue::score_moves(&pos, attacker, &self.tt);
+        let scores = tinue::score_moves(&pos, attacker, scope, &self.tt);
         let entries: Vec<MoveScoreEntry> = scores
             .into_iter()
             .map(|s| MoveScoreEntry {
