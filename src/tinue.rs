@@ -1262,28 +1262,62 @@ mod tests {
         }
     }
 
+    /// A real mate-in-5 **gap tinue** from a PlayTak game, whose winning first
+    /// move `3b3+` threatens nothing — so no tak chain reaches it at any
+    /// depth. Sourced from the `topaz_missed_tinues` table of the labelled
+    /// puzzle database, i.e. a position independently flagged as one Topaz
+    /// could not find.
+    ///
+    /// This is the shallowest gap tinue on hand, which makes it the fixture
+    /// that keeps the scope tests cheap: full mode proves it in ~20k nodes,
+    /// while restricted mode refuses it in ~23.
+    const GAP_TINUE_5PLY: &str = "2,2,x,x,1/2,2,x,1,x/x,212,1,x,x/x,1,1,x,x/1,x,x,x,x 2 8";
+
+    #[test]
+    fn full_finds_a_gap_tinue_that_no_tak_chain_reaches() {
+        match solve_scoped(GAP_TINUE_5PLY, 5, TinueScope::Full, 5) {
+            TinueResult::Tinue { plies, pv, .. } => {
+                assert_eq!(plies, 5);
+                assert_eq!(pv[0].to_string(), "3b3+", "the quiet key move");
+            }
+            other => panic!("full mode must find this mate in 5, got {:?}", other),
+        }
+
+        // Searched well past the mate distance to show the restriction is
+        // what excludes it, not the depth budget.
+        assert!(
+            matches!(
+                solve_scoped(GAP_TINUE_5PLY, 5, TinueScope::TakChain, 11),
+                TinueResult::NoTinue { .. }
+            ),
+            "the winning first move is quiet, so no tak chain can reach this win"
+        );
+    }
+
     #[test]
     fn scopes_do_not_share_transposition_entries() {
-        // Regression for the TT namespace split. A TakChain `NoWin` is the
-        // weaker claim "no tak-chain win"; if the two scopes shared a key
-        // space, the restricted pass below would poison the full pass and
-        // the mate would disappear.
+        // Regression for the TT namespace split, on the case that actually
+        // hurts. A TakChain `NoWin` is the weaker claim "no tak-chain win";
+        // sharing a key space would let the restricted pass below convince
+        // the full pass that this position is quiet — and since it is a gap
+        // tinue, full mode is the only thing that can see the win at all.
         //
-        // Ordering matters: restricted runs first precisely so that its
-        // `NoWin` entries are already sitting in the table when full mode
-        // probes the same positions.
-        let (pos, _guard) = parse("1,x3,2/2,1C,x2,2/1,1,x2,2/x,1,2C,2,2/x2,1,1,1 2 8", 5);
+        // Ordering matters: restricted runs first precisely so its `NoWin`
+        // entries are already in the table when full mode probes the same
+        // positions.
+        let (pos, _guard) = parse(GAP_TINUE_5PLY, 5);
         let mut tt = Tt::new(TT_DEFAULT_BITS);
 
         let restricted = Limits {
-            max_plies: 3,
+            max_plies: 5,
             scope: TinueScope::TakChain,
             ..Default::default()
         };
         let (early, _) = solve_with_tt(&pos, &restricted, &mut tt);
         assert!(
             matches!(early, TinueResult::NoTinue { .. }),
-            "mate is in 5, so a 3-ply restricted probe must come back empty"
+            "restricted mode cannot see a gap tinue, got {:?}",
+            early
         );
 
         let full = Limits {
@@ -1294,7 +1328,10 @@ mod tests {
         let (result, _) = solve_with_tt(&pos, &full, &mut tt);
         match result {
             TinueResult::Tinue { plies, .. } => assert_eq!(plies, 5),
-            other => panic!("full mode must be unaffected by the restricted pass, got {:?}", other),
+            other => panic!(
+                "full mode must be unaffected by the restricted pass, got {:?}",
+                other
+            ),
         }
     }
 

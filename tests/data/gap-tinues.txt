@@ -1,0 +1,29 @@
+# Gap tinues: forced road wins whose winning FIRST move threatens nothing.
+# Format: <size> <verified_plies> <quiet_first_move> <tps>
+#
+# These are the positions that separate TinueScope::Full from
+# TinueScope::TakChain. Because the key move creates no road-in-1 threat, no
+# tak chain reaches the win — a tak-chain-restricted solver (Topaz, and
+# syntaks under --scope tak-chain) reports no_tinue at ANY depth, while full
+# mode proves the mate.
+#
+# Provenance: the `topaz_missed_tinues` table of the labelled PlayTak puzzle
+# database (~/MEGA/PTN/puzzles/puzzles.db) — 68 positions flagged by that
+# pipeline as ones Topaz could not find. Running both scopes over the set
+# yielded these 7 at depth <= 7. Every ply count and first move below was
+# verified with the solver, and each first move was independently confirmed
+# quiet by checking that `--scope tak-chain --root-move <move>` rejects it.
+#
+# They are rare and hard to come by: a sweep of 1,000 randomly generated
+# contested positions at depth <= 7 turned up none at all. Treat this file as
+# a scarce fixture set rather than something regenerable on demand.
+#
+# The two named deep examples in src/tinue.rs (archvenison_2026_05_24 and
+# morten_5s_tinue_2) are both mate-in-9 gap tinues from the same family.
+5 5 3b3+ 2,2,x,x,1/2,2,x,1,x/x,212,1,x,x/x,1,1,x,x/1,x,x,x,x 2 8
+5 7 2e5<11 112112,x,2121222,x,12C/1S,2,1S,x,x/2,1C,1,1,x/2,1,1,x,x/112,2,112,x,1 2 31
+5 7 Cd2 2,x,x,x,12/x,x,121,x,1/x,2,x,1,x/x,x,121,x,221/x,x,x,x,22221 1 19
+5 7 Cd4 1,x,x,x,x/1,121,x,x,x/2,x,x,121,x/2,x,2,x,1/2,2,2,x,1 1 11
+5 7 b4- 2,212,x,x,21/2,2C,1,x,x/212,1S,1121,12,2/1S,1,x,x,x/2,x,x,x,1 2 18
+5 7 b4> x,x,x,x,12/12,2C,1121112S,12,x/x,x,1C,x,x/x,x,x,1,x/x,x,1,1,x 2 16
+6 7 6b3> 21,x,2C,x,x,x/21,11,x,2,x,x/21,221,11C,x,x,x/x,11212221,x,x,2,x/x,2S,2,x,x,x/2,1,2,x,x,x 1 26
