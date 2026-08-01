@@ -11,6 +11,14 @@ path = "src/lib.rs"
 name = "syntaks"
 path = "src/main.rs"
 
+[[bin]]
+name = "tinue"
+path = "src/bin/tinue.rs"
+
+[[bin]]
+name = "genpos"
+path = "src/bin/genpos.rs"
+
 [features]
 pext = []
 
