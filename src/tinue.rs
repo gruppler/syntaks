@@ -35,7 +35,7 @@
 
 use crate::bitboard::Bitboard;
 use crate::board::{FlatCountOutcome, Position};
-use crate::core::{Direction, Player};
+use crate::core::{Direction, PieceType, Player};
 use crate::movegen::generate_moves;
 use crate::takmove::Move;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -131,12 +131,42 @@ impl Tt {
 const ATTACKER_KEY_MASK_P1: u64 = 0;
 const ATTACKER_KEY_MASK_P2: u64 = 1u64 << 63;
 
+/// Second namespace axis, for the same reason as the attacker mask: a stored
+/// verdict means something different under each [`TinueScope`].
+///
+/// A `TakChain` `NoWin` is the *weaker* claim "no tak-chain win at this
+/// depth"; a `Full` `NoWin` is "no win at all at this depth". Letting a full
+/// search read a restricted `NoWin` would silently discard exactly the gap
+/// tinues full mode exists to find. (`Win` entries are compatible in the
+/// other direction — a restricted proof is a real proof — but the two are
+/// kept fully disjoint rather than relying on flag-by-flag reasoning.)
+///
+/// This matters in practice because the sweep path shares one [`Tt`] across
+/// many `solve_with_tt` calls, and the scope toggle can flip between them.
+const SCOPE_KEY_MASK_FULL: u64 = 0;
+const SCOPE_KEY_MASK_TAK_CHAIN: u64 = 1u64 << 62;
+
 #[inline]
 fn attacker_key_mask(attacker: Player) -> u64 {
     match attacker {
         Player::P1 => ATTACKER_KEY_MASK_P1,
         Player::P2 => ATTACKER_KEY_MASK_P2,
     }
+}
+
+#[inline]
+fn scope_key_mask(scope: TinueScope) -> u64 {
+    match scope {
+        TinueScope::Full => SCOPE_KEY_MASK_FULL,
+        TinueScope::TakChain => SCOPE_KEY_MASK_TAK_CHAIN,
+    }
+}
+
+/// Combined TT namespace for a search. See [`attacker_key_mask`] and
+/// [`scope_key_mask`].
+#[inline]
+fn namespace_key_mask(attacker: Player, scope: TinueScope) -> u64 {
+    attacker_key_mask(attacker) ^ scope_key_mask(scope)
 }
 
 /// Result of a tinue search.
@@ -174,6 +204,54 @@ pub enum AbortReason {
     Depth,
 }
 
+/// Which move set the search explores — a **semantic** choice that changes
+/// *what counts as a tinue*, not merely how fast it is found.
+///
+/// * [`TinueScope::Full`] searches every legal move for both sides. It finds
+///   every forced road win, including *gap tinues* whose winning line passes
+///   through a quiet move that threatens nothing (`archvenison_2026_05_24`
+///   and `morten_5s_tinue_2` in this module's tests are both mate-in-9 gap
+///   tinues).
+/// * [`TinueScope::TakChain`] restricts the attacker to moves that leave a
+///   live road-in-1 threat, and the defender to replies that answer it. This
+///   is the conventional "tinue" of Tak literature and tooling (it is what
+///   Topaz proves), and it collapses the branching factor enormously — but
+///   it is *incomplete*: a `NoTinue` under this scope means "no tak-chain
+///   tinue", **not** "no tinue". Callers must label it accordingly.
+///
+/// Restricted results are a strict subset of full results: anything provable
+/// under `TakChain` is provable under `Full`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum TinueScope {
+    #[default]
+    Full,
+    TakChain,
+}
+
+impl TinueScope {
+    /// Canonical spelling, used by the CLI, the TEI `tinue` command and the
+    /// wasm bindings so every entry point names the modes identically.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TinueScope::Full => "full",
+            TinueScope::TakChain => "tak-chain",
+        }
+    }
+}
+
+impl std::str::FromStr for TinueScope {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "full" => Ok(TinueScope::Full),
+            "tak-chain" | "tak_chain" | "takchain" | "chain" | "tak" => Ok(TinueScope::TakChain),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Limits<'a> {
     pub max_plies: u32,
@@ -184,6 +262,25 @@ pub struct Limits<'a> {
     /// depth. Cheap because the TT is hot from the primary search. The
     /// extra winners (if any) land in `TinueResult::Tinue::winning_first_moves`.
     pub find_all_winners: bool,
+    /// Move-set restriction. See [`TinueScope`]. Defaults to `Full` so that
+    /// existing callers keep the complete (gap-tinue-finding) semantics.
+    pub scope: TinueScope,
+    /// **Sweep-only** heuristic pre-filter. When `Some(margin)`, a position
+    /// whose attacker [`road_distance`] exceeds the attacker's move budget
+    /// within `max_plies` plus `margin` is reported `NoTinue` without any
+    /// search at all — most of a game (all of the opening) is nowhere near a
+    /// road and should not cost a solver call.
+    ///
+    /// The test is position-intrinsic rather than ply-index based on purpose:
+    /// a game may start from an arbitrary TPS, so move number carries no
+    /// information about road proximity.
+    ///
+    /// [`road_distance`] is a heuristic, not a lower bound (a spread can fill
+    /// several path squares in one move, and blockers are not permanent), so
+    /// this can in principle skip a real tinue. Leave it `None` — the default
+    /// — for any explicit single-position solve, where correctness outranks
+    /// speed. It exists for best-effort full-game marking only.
+    pub prefilter_margin: Option<u32>,
 }
 
 impl Default for Limits<'_> {
@@ -193,7 +290,24 @@ impl Default for Limits<'_> {
             max_nodes: u64::MAX,
             cancel: None,
             find_all_winners: true,
+            scope: TinueScope::Full,
+            prefilter_margin: None,
         }
+    }
+}
+
+/// Would the sweep pre-filter skip this position — i.e. is the side to move
+/// too far from any road for a win within `max_plies` to be plausible?
+///
+/// Heuristic. See [`Limits::prefilter_margin`] and [`road_distance`] for why
+/// this must not gate an explicit single-position solve.
+#[must_use]
+pub fn prefilter_skips(pos: &Position, max_plies: u32, margin: u32) -> bool {
+    // Attacker moves available inside an odd-ply horizon: plies 1, 3, 5, …
+    let attacker_moves = max_plies.div_ceil(2);
+    match road_distance(pos, pos.stm()) {
+        None => true,
+        Some(d) => d > attacker_moves + margin,
     }
 }
 
@@ -205,14 +319,20 @@ pub struct Stats {
 
 struct Searcher<'a, 'b> {
     attacker: Player,
-    /// XOR'd into every TT key so entries are partitioned by attacker.
-    /// See [`attacker_key_mask`] for the rationale.
-    attacker_mask: u64,
+    /// XOR'd into every TT key so entries are partitioned by attacker and
+    /// scope. See [`namespace_key_mask`] for the rationale.
+    ns_mask: u64,
+    scope: TinueScope,
     nodes: AtomicU64,
     node_limit: u64,
     cancel: Option<&'a AtomicBool>,
     aborted: bool,
     tt: &'b mut Tt,
+    /// Scratch move buffer reused by [`Searcher::has_road_in_1`]. That helper
+    /// is called once per move at every restricted node, so allocating a
+    /// fresh `Vec` per call would dominate the search. It never recurses, so
+    /// a single buffer swapped out with `mem::take` is safe.
+    threat_buf: Vec<Move>,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -230,18 +350,75 @@ impl<'a, 'b> Searcher<'a, 'b> {
     fn new(attacker: Player, limits: &Limits<'a>, tt: &'b mut Tt) -> Self {
         Self {
             attacker,
-            attacker_mask: attacker_key_mask(attacker),
+            ns_mask: namespace_key_mask(attacker, limits.scope),
+            scope: limits.scope,
             nodes: AtomicU64::new(0),
             node_limit: limits.max_nodes,
             cancel: limits.cancel,
             aborted: false,
             tt,
+            threat_buf: Vec::with_capacity(128),
         }
     }
 
     #[inline]
     fn tt_key(&self, pos: &Position) -> u64 {
-        pos.key() ^ self.attacker_mask
+        pos.key() ^ self.ns_mask
+    }
+
+    #[inline]
+    fn restricted(&self) -> bool {
+        self.scope == TinueScope::TakChain
+    }
+
+    /// The side to move at `pos` completes their own road with this move —
+    /// i.e. `pos` is "tak" for them. Returns the completing move so callers
+    /// can record an exact PV; `None` if no such move exists.
+    ///
+    /// Placements are answered without applying the move: a flat or capstone
+    /// on an empty square `s` changes the mover's road bitboard to exactly
+    /// `roads | s`, so one `has_road` on that union settles it. Walls never
+    /// extend a road and are skipped outright. Only spreads need a real
+    /// `apply_move`, and `generate_moves` emits placements first, so the
+    /// cheap answers are tried before the expensive ones.
+    fn road_in_1_move(&mut self, pos: &Position) -> Option<Move> {
+        let stm = pos.stm();
+        let roads = pos.roads(stm);
+
+        let mut buf = std::mem::take(&mut self.threat_buf);
+        generate_moves(&mut buf, pos);
+
+        let mut found = None;
+        for &mv in &buf {
+            let completes = if mv.is_spread() {
+                pos.apply_move(mv).has_road(stm)
+            } else if mv.pt() == PieceType::Wall {
+                false
+            } else {
+                crate::road::has_road(roads.with_sq(mv.sq()))
+            };
+            if completes {
+                found = Some(mv);
+                break;
+            }
+        }
+
+        self.threat_buf = buf;
+        found
+    }
+
+    /// Does the attacker threaten to complete a road on their next move, in a
+    /// position where the *defender* is to move? Asked at attacker nodes of a
+    /// restricted search to decide whether a candidate move keeps the tak
+    /// chain alive.
+    ///
+    /// Implemented by passing the turn back to the attacker with a null move.
+    /// That is exactly the "if the defender did nothing, could I finish?"
+    /// question a tak threat encodes.
+    fn attacker_threatens_road(&mut self, pos: &Position) -> bool {
+        debug_assert_ne!(pos.stm(), self.attacker);
+        let passed = pos.apply_nullmove();
+        self.road_in_1_move(&passed).is_some()
     }
 
     fn check_abort(&mut self) -> bool {
@@ -337,6 +514,11 @@ impl<'a, 'b> Searcher<'a, 'b> {
             if !matches!(next.count_flats(), FlatCountOutcome::None) {
                 continue;
             }
+            // Same restriction as the primary search, so the enumerated
+            // winners are drawn from the same move set as the proof.
+            if self.restricted() && !self.attacker_threatens_road(&next) {
+                continue;
+            }
 
             let mut sub_pv = Vec::new();
             match self.search_defender(&next, depth - 1, &mut sub_pv) {
@@ -423,6 +605,17 @@ impl<'a, 'b> Searcher<'a, 'b> {
                 continue;
             }
 
+            // Tak-chain scope: the attacker may only play moves that leave a
+            // live road threat. A move that threatens nothing breaks the
+            // chain — and those quiet moves are precisely what gap tinues
+            // are built on, which is why this scope cannot find them.
+            //
+            // An outright road win was already returned above, so this can
+            // never filter away a winning move.
+            if self.restricted() && !self.attacker_threatens_road(&next) {
+                continue;
+            }
+
             let mut sub_pv = Vec::new();
             match self.search_defender(&next, depth - 1, &mut sub_pv) {
                 NodeOutcome::AttackerWins(plies) => {
@@ -494,14 +687,18 @@ impl<'a, 'b> Searcher<'a, 'b> {
             return NodeOutcome::DefenderHolds;
         }
 
-        // Defender-move pruning is intentionally NOT applied here. An
-        // earlier "road-relevance zone" filter (kept the move only if its
-        // source/target was in or one orthogonal step from a road piece)
-        // turned out to be unsound: it ignored intermediate drop squares of
-        // a spread, so a spread starting and ending outside the zone but
-        // dropping a stone on a critical road-blocking square was wrongly
-        // pruned. That produced false-positive Tinuës in real games.
+        // Geometric defender-move pruning is intentionally NOT applied here,
+        // in either scope. An earlier "road-relevance zone" filter (kept the
+        // move only if its source/target was in or one orthogonal step from a
+        // road piece) turned out to be unsound: it ignored intermediate drop
+        // squares of a spread, so a spread starting and ending outside the
+        // zone but dropping a stone on a critical road-blocking square was
+        // wrongly pruned. That produced false-positive Tinuës in real games.
         // Soundness > speed for tinue annotation.
+        //
+        // `TinueScope::TakChain` gets its branching reduction a different
+        // way — see the road-in-1 shortcut inside the loop below, which
+        // consults the resulting position rather than the move's shape.
 
         order_defender_moves(pos, &mut moves, self.attacker);
         if let Some(tt_mv) = tt_move
@@ -570,6 +767,37 @@ impl<'a, 'b> Searcher<'a, 'b> {
                     return NodeOutcome::DefenderHolds;
                 }
                 FlatCountOutcome::None => {}
+            }
+
+            // Tak-chain scope: a reply that leaves the attacker a live
+            // road-in-1 loses on the spot, so it needs no subtree — score it
+            // as the 2-ply loss it is and move on.
+            //
+            // Note this *records* the move as losing rather than dropping it
+            // from the move list. Dropping would be wrong twice over: the
+            // AND node would silently shed a child it is still obliged to
+            // refute, and a node where every reply loses this way would look
+            // childless and fall through to `DefenderHolds`.
+            //
+            // This is the sound form of the defender pruning reverted in the
+            // full search (see the note above the ordering call). It asks the
+            // resulting position whether the threat actually survives instead
+            // of inferring from move geometry, so a spread that blocks via an
+            // intermediate drop square is classified correctly — that was the
+            // exact bug that made the old zone filter produce false tinues.
+            //
+            // Gated on `depth >= 2` so mate distances still match what
+            // iterative deepening reports: at depth 1 the child search bottoms
+            // out at depth 0 and yields `DefenderHolds`, and this shortcut
+            // must not claim a win the depth budget cannot pay for.
+            if self.restricted() && depth >= 2
+                && let Some(finish) = self.road_in_1_move(&next)
+            {
+                let cand_plies = 2;
+                if longest.as_ref().map_or(true, |(w, _)| cand_plies > *w) {
+                    longest = Some((cand_plies, vec![mv, finish]));
+                }
+                continue;
             }
 
             let mut sub_pv = Vec::new();
@@ -660,9 +888,19 @@ pub struct MoveScore {
 /// of whose turn it is in `pos`. Typical usage during proof exploration:
 /// keep `attacker` fixed to whoever was proven to win the root puzzle and
 /// pass it on every `score_moves` call as the user navigates.
-pub fn score_moves(pos: &Position, attacker: Player, tt: &Tt) -> Vec<MoveScore> {
+///
+/// `scope` must match the scope of the solve that populated `tt` — entries
+/// are namespaced per scope (see [`scope_key_mask`]), so passing the wrong
+/// one reports every move as `Unknown` rather than reading another scope's
+/// verdicts.
+pub fn score_moves(
+    pos: &Position,
+    attacker: Player,
+    scope: TinueScope,
+    tt: &Tt,
+) -> Vec<MoveScore> {
     let stm = pos.stm();
-    let mask = attacker_key_mask(attacker);
+    let mask = namespace_key_mask(attacker, scope);
     let mut out = Vec::with_capacity(64);
     let mut moves = Vec::with_capacity(64);
     generate_moves(&mut moves, pos);
@@ -736,6 +974,103 @@ pub fn score_moves(pos: &Position, attacker: Player, tt: &Tt) -> Vec<MoveScore> 
     }
 
     out
+}
+
+#[inline]
+fn neighbors(bb: Bitboard) -> Bitboard {
+    bb.shift(Direction::Up)
+        | bb.shift(Direction::Down)
+        | bb.shift(Direction::Left)
+        | bb.shift(Direction::Right)
+}
+
+/// Grow `set` through cost-free squares until it stops changing.
+fn close_over_zero(mut set: Bitboard, zero: Bitboard) -> Bitboard {
+    loop {
+        let next = set | (neighbors(set) & zero);
+        if next == set {
+            return set;
+        }
+        set = next;
+    }
+}
+
+/// 0-1 BFS across one axis. `start`/`end` are the two opposing edges.
+/// Squares in `zero` are already controlled (free to traverse); every other
+/// passable square costs one. `start` is re-injected at each layer so the
+/// walk can begin from any edge square, not only one adjacent to the set
+/// already reached — the bitboard equivalent of a virtual source node.
+fn axis_road_distance(
+    start: Bitboard,
+    end: Bitboard,
+    zero: Bitboard,
+    passable: Bitboard,
+) -> Option<u32> {
+    let mut cur = close_over_zero(start & zero, zero);
+    if !(cur & end).is_empty() {
+        return Some(0);
+    }
+    let mut cost = 0u32;
+    loop {
+        let grown = (neighbors(cur) | start) & passable & !cur;
+        if grown.is_empty() {
+            return None;
+        }
+        cost += 1;
+        cur = close_over_zero(cur | grown, zero);
+        if !(cur & end).is_empty() {
+            return Some(cost);
+        }
+    }
+}
+
+/// How many further squares must `player` come to control to complete their
+/// nearest road? `None` means no connecting path exists across either axis
+/// given the opponent's current blockers.
+///
+/// Own road pieces cost nothing to traverse, any other non-blocked square
+/// costs one, and squares under an opponent wall or capstone are treated as
+/// impassable. The result is the cheaper of the two axes.
+///
+/// # This is a heuristic, not a bound
+///
+/// Two independent reasons, both of which rule it out of any path where
+/// correctness matters:
+///
+/// 1. It counts squares as if each cost one *placement*, but a single spread
+///    can drop stones on several path squares at once. So the true number of
+///    attacker moves needed can be lower than this count.
+/// 2. Impassability is not permanent. The defender may move a blocking wall
+///    or capstone away of their own accord, at which point the square becomes
+///    reachable. A `None` therefore means "no road along currently-open
+///    lines", not "no road is possible in any continuation".
+///
+/// Point 2 is worth stating plainly because it is tempting to treat the
+/// connectivity test as a free always-safe fast-out. It is not one. Use this
+/// only for best-effort sweep marking, gated behind `Limits::prefilter_margin`
+/// and never on an explicit single-position solve.
+#[must_use]
+pub fn road_distance(pos: &Position, player: Player) -> Option<u32> {
+    let passable = !pos.blockers(player.flip());
+    let zero = pos.roads(player) & passable;
+
+    let vertical = axis_road_distance(
+        Bitboard::lower_edge(),
+        Bitboard::upper_edge(),
+        zero,
+        passable,
+    );
+    let horizontal = axis_road_distance(
+        Bitboard::left_edge(),
+        Bitboard::right_edge(),
+        zero,
+        passable,
+    );
+
+    match (vertical, horizontal) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (only, None) | (None, only) => only,
+    }
 }
 
 /// Order attacker moves by likely tinue value. Tiers are separated by
@@ -846,6 +1181,199 @@ mod tests {
             "expected NoTinue, got {:?}",
             result
         );
+    }
+
+    fn solve_scoped(tps: &str, size: u8, scope: TinueScope, max_plies: u32) -> TinueResult {
+        let (pos, _guard) = parse(tps, size);
+        let limits = Limits {
+            max_plies,
+            scope,
+            ..Default::default()
+        };
+        solve(&pos, &limits).0
+    }
+
+    // ---- TinueScope::TakChain -------------------------------------------
+
+    #[test]
+    fn tak_chain_finds_the_same_mate_as_full_on_alion_5x5() {
+        // Alion's 5x5 mate-in-5 is a strict tak chain, so restricting the
+        // move set must not change the verdict or the distance — only the
+        // node count (roughly 7x fewer at the time of writing).
+        let result = solve_scoped(
+            "1,x3,2/2,1C,x2,2/1,1,x2,2/x,1,2C,2,2/x2,1,1,1 2 8",
+            5,
+            TinueScope::TakChain,
+            5,
+        );
+        match result {
+            TinueResult::Tinue { plies, .. } => assert_eq!(plies, 5),
+            other => panic!("expected tak-chain tinue in 5, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tak_chain_rejects_the_archvenison_gap_tinue() {
+        // The counterpart to `archvenison_2026_05_24`: full mode proves a
+        // mate in 9, but the winning line opens with a quiet move, so no tak
+        // chain reaches it. Topaz reports no_tinue here for the same reason.
+        //
+        // Cheap despite the depth-9 budget — the restriction collapses the
+        // tree to a few hundred nodes — which is why this runs by default
+        // while its full-mode twin stays `#[ignore]`d.
+        let result = solve_scoped(
+            "1,122121S,1,1,1/x,2S,1S,1,1/12,x4/2,2,x,221C,2S/2,2,2,12C,1S 1 24",
+            5,
+            TinueScope::TakChain,
+            9,
+        );
+        assert!(
+            matches!(result, TinueResult::NoTinue { .. }),
+            "tak-chain scope must not find the gap tinue, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn tak_chain_rejects_the_morten_5s_gap_tinue() {
+        // Second known mate-in-9 gap tinue; same expectation as above.
+        let result = solve_scoped(
+            "2,2221S,2,x2/2,x,2,221S,2/x2,2,x2/12C,2,x,1,x/1221S,1,21121C,1,1 1 28",
+            5,
+            TinueScope::TakChain,
+            9,
+        );
+        assert!(
+            matches!(result, TinueResult::NoTinue { .. }),
+            "tak-chain scope must not find the gap tinue, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn tak_chain_still_sees_an_immediate_road() {
+        // A mate-in-one is a degenerate tak chain. The attacker restriction
+        // filters on "leaves a live threat", so a move that *is* the road
+        // must be exempted — otherwise the shortest tinues would vanish.
+        let result = solve_scoped("x5/x5/x5/x5/1,1,1,1,x 1 5", 5, TinueScope::TakChain, 1);
+        match result {
+            TinueResult::Tinue { plies, .. } => assert_eq!(plies, 1),
+            other => panic!("expected mate in 1, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn scopes_do_not_share_transposition_entries() {
+        // Regression for the TT namespace split. A TakChain `NoWin` is the
+        // weaker claim "no tak-chain win"; if the two scopes shared a key
+        // space, the restricted pass below would poison the full pass and
+        // the mate would disappear.
+        //
+        // Ordering matters: restricted runs first precisely so that its
+        // `NoWin` entries are already sitting in the table when full mode
+        // probes the same positions.
+        let (pos, _guard) = parse("1,x3,2/2,1C,x2,2/1,1,x2,2/x,1,2C,2,2/x2,1,1,1 2 8", 5);
+        let mut tt = Tt::new(TT_DEFAULT_BITS);
+
+        let restricted = Limits {
+            max_plies: 3,
+            scope: TinueScope::TakChain,
+            ..Default::default()
+        };
+        let (early, _) = solve_with_tt(&pos, &restricted, &mut tt);
+        assert!(
+            matches!(early, TinueResult::NoTinue { .. }),
+            "mate is in 5, so a 3-ply restricted probe must come back empty"
+        );
+
+        let full = Limits {
+            max_plies: 5,
+            scope: TinueScope::Full,
+            ..Default::default()
+        };
+        let (result, _) = solve_with_tt(&pos, &full, &mut tt);
+        match result {
+            TinueResult::Tinue { plies, .. } => assert_eq!(plies, 5),
+            other => panic!("full mode must be unaffected by the restricted pass, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn score_moves_does_not_read_across_scopes() {
+        // The other half of the namespace split: a full-scope solve's
+        // verdicts must be invisible to a TakChain lookup, so callers that
+        // pass a mismatched scope get `Unknown` rather than another scope's
+        // answers.
+        let (pos, _guard) = parse("x5/x5/x5/x5/1,1,1,1,x 1 5", 5);
+        let limits = Limits {
+            max_plies: 1,
+            ..Default::default()
+        };
+        let mut tt = Tt::new(TT_DEFAULT_BITS);
+        let (_, _) = solve_with_tt(&pos, &limits, &mut tt);
+
+        // a2 is a quiet placement: not an immediate road either way, so its
+        // verdict can only come from the TT — which makes it a clean probe
+        // for whether the namespaces leak.
+        let matching = score_moves(&pos, Player::P1, TinueScope::Full, &tt);
+        let mismatched = score_moves(&pos, Player::P1, TinueScope::TakChain, &tt);
+        for scores in [&matching, &mismatched] {
+            let a2 = scores.iter().find(|s| s.mv.to_string() == "a2").unwrap();
+            assert!(
+                matches!(a2.kind, MoveScoreKind::Unknown),
+                "a2 was never searched at depth 1, expected Unknown, got {:?}",
+                a2.kind
+            );
+        }
+    }
+
+    // ---- road_distance / sweep pre-filter --------------------------------
+
+    #[test]
+    fn road_distance_counts_squares_still_needed() {
+        // Empty 5x5: five squares to cross, none of them owned yet.
+        let (pos, _guard) = parse("x5/x5/x5/x5/x5 1 3", 5);
+        assert_eq!(road_distance(&pos, Player::P1), Some(5));
+        drop(_guard);
+
+        // Four flats on rank 1 — one square short of a road.
+        let (pos, _guard) = parse("x5/x5/x5/x5/1,1,1,1,x 1 5", 5);
+        assert_eq!(road_distance(&pos, Player::P1), Some(1));
+        drop(_guard);
+
+        // A finished road costs nothing further.
+        let (pos, _guard) = parse("x5/x5/x5/x5/1,1,1,1,1 2 6", 5);
+        assert_eq!(road_distance(&pos, Player::P1), Some(0));
+    }
+
+    #[test]
+    fn road_distance_is_none_when_every_line_is_walled_off() {
+        // P2 walls fill rank 3 and file c, so no unblocked path crosses
+        // either axis for P1 given the current blockers.
+        let (pos, _guard) = parse("x2,2S,x2/x2,2S,x2/2S,2S,2S,2S,2S/x2,2S,x2/x2,2S,x2 1 10", 5);
+        assert_eq!(road_distance(&pos, Player::P1), None);
+    }
+
+    #[test]
+    fn prefilter_skips_only_far_positions() {
+        // A mate-in-one must never be skipped, however tight the margin.
+        let (pos, _guard) = parse("x5/x5/x5/x5/1,1,1,1,x 1 5", 5);
+        assert!(!prefilter_skips(&pos, 5, 0));
+        drop(_guard);
+
+        // An empty board needs 5 squares; a 3-ply horizon buys the attacker
+        // 2 moves, so with no margin it is skipped and with a margin of 3 it
+        // is not.
+        let (pos, _guard) = parse("x5/x5/x5/x5/x5 1 3", 5);
+        assert!(prefilter_skips(&pos, 3, 0));
+        assert!(!prefilter_skips(&pos, 3, 3));
+    }
+
+    #[test]
+    fn prefilter_is_off_by_default() {
+        // The filter is heuristic, so nothing may enable it implicitly.
+        assert_eq!(Limits::default().prefilter_margin, None);
+        assert_eq!(Limits::default().scope, TinueScope::Full);
     }
 
     #[test]
@@ -973,7 +1501,7 @@ mod tests {
         let (result, _) = solve_with_tt(&pos, &limits, &mut tt);
         assert!(matches!(result, TinueResult::Tinue { plies: 1, .. }));
 
-        let scores = score_moves(&pos, Player::P1, &tt);
+        let scores = score_moves(&pos, Player::P1, TinueScope::Full, &tt);
         let win = scores
             .iter()
             .find(|s| s.mv.to_string() == "e1")
@@ -1023,7 +1551,7 @@ mod tests {
         };
         assert!(!winners.is_empty());
 
-        let scores = score_moves(&pos, Player::P2, &tt);
+        let scores = score_moves(&pos, Player::P2, TinueScope::Full, &tt);
         for w in &winners {
             let entry = scores
                 .iter()
@@ -1057,6 +1585,119 @@ mod tests {
 pub fn solve<'a>(pos: &Position, limits: &Limits<'a>) -> (TinueResult, Stats) {
     let mut tt = Tt::new(TT_DEFAULT_BITS);
     solve_with_tt(pos, limits, &mut tt)
+}
+
+/// Run one root-level search at `depth`, restricting the attacker's *first*
+/// move — and only the first — to `root_move`. This answers "does this
+/// specific candidate force a win at `depth`?" without wading through (and
+/// deep-searching) every other root move first. Everything below the root is
+/// the normal search for the configured [`TinueScope`], so the defender still
+/// gets every reply the scope allows and the proof stays sound. If
+/// `root_move` wins, the position *is* tinue — one winning attacker move
+/// suffices — and `plies` is that move's mate length.
+///
+/// Use this for candidate verification or deep analysis of a parked position
+/// where a strong first move is already suspected: notably a quiet non-tak
+/// move, which the tak-chain-biased move ordering would otherwise try last.
+///
+/// Under [`TinueScope::TakChain`] a `root_move` that leaves no live threat is
+/// reported `NoTinue` immediately — it is not a legal link in a tak chain, so
+/// there is nothing to search.
+pub fn solve_one_depth_root_move<'a>(
+    pos: &Position,
+    depth: u32,
+    tt: &mut Tt,
+    limits: &Limits<'a>,
+    root_move: Move,
+) -> (TinueResult, Stats) {
+    let attacker = pos.stm();
+
+    // Terminal short-circuit, identical to solve_one_depth.
+    if pos.has_road(attacker) || pos.has_road(attacker.flip()) {
+        return (
+            TinueResult::NoTinue { searched_plies: 0 },
+            Stats::default(),
+        );
+    }
+
+    let mut searcher = Searcher::new(attacker, limits, tt);
+    let mut pv: Vec<Move> = Vec::with_capacity(depth as usize);
+
+    // Single-move root expansion: mirror one iteration of search_attacker's
+    // per-move loop for `root_move` only.
+    let outcome = 'root: {
+        let next = pos.apply_move(root_move);
+        if next.has_road(attacker) {
+            pv.push(root_move);
+            break 'root NodeOutcome::AttackerWins(1);
+        }
+        // The candidate handed the defender a road, or reached a flat-count
+        // terminal — either way it is not a winning first move.
+        if next.has_road(attacker.flip()) || !matches!(next.count_flats(), FlatCountOutcome::None) {
+            break 'root NodeOutcome::DefenderHolds;
+        }
+        if searcher.restricted() && !searcher.attacker_threatens_road(&next) {
+            break 'root NodeOutcome::DefenderHolds;
+        }
+        let mut sub_pv = Vec::new();
+        match searcher.search_defender(&next, depth - 1, &mut sub_pv) {
+            NodeOutcome::AttackerWins(plies) => {
+                pv.push(root_move);
+                pv.extend_from_slice(&sub_pv);
+                NodeOutcome::AttackerWins(plies + 1)
+            }
+            other => other,
+        }
+    };
+
+    let nodes = searcher.nodes.load(Ordering::Relaxed);
+    match outcome {
+        NodeOutcome::AttackerWins(plies) => {
+            pv.truncate(plies as usize);
+            let winners = if pv.is_empty() {
+                Vec::new()
+            } else {
+                vec![pv[0]]
+            };
+            (
+                TinueResult::Tinue {
+                    plies,
+                    pv,
+                    winning_first_moves: winners,
+                },
+                Stats {
+                    nodes,
+                    max_depth_reached: depth,
+                },
+            )
+        }
+        NodeOutcome::DefenderHolds => (
+            TinueResult::NoTinue {
+                searched_plies: depth,
+            },
+            Stats {
+                nodes,
+                max_depth_reached: depth,
+            },
+        ),
+        NodeOutcome::Aborted => {
+            let reason = if nodes >= limits.max_nodes {
+                AbortReason::Nodes
+            } else {
+                AbortReason::Cancelled
+            };
+            (
+                TinueResult::Aborted {
+                    reason,
+                    searched_plies: 0,
+                },
+                Stats {
+                    nodes,
+                    max_depth_reached: depth,
+                },
+            )
+        }
+    }
 }
 
 /// Run exactly one root-level search at the given odd depth. Use this when
@@ -1159,6 +1800,19 @@ pub fn solve_with_tt<'a>(
     if pos.has_road(attacker) || pos.has_road(attacker.flip()) {
         return (
             TinueResult::NoTinue { searched_plies: 0 },
+            Stats::default(),
+        );
+    }
+
+    // Best-effort sweep skip; disabled by default. See `prefilter_margin`.
+    if limits
+        .prefilter_margin
+        .is_some_and(|margin| prefilter_skips(pos, limits.max_plies, margin))
+    {
+        return (
+            TinueResult::NoTinue {
+                searched_plies: limits.max_plies,
+            },
             Stats::default(),
         );
     }
