@@ -123,17 +123,28 @@ def pending(scope: str, limit: int | None) -> list[tuple[str, int, int | None]]:
     """Positions with no result yet for this scope, with their label as a depth hint."""
     col = "chain_verdict" if scope == "tak-chain" else "full_verdict"
     con = sqlite3.connect(f"file:{WORK}?mode=ro", uri=True)
-    # Labelled rows first: those are the ones with a claim to correct, so
-    # they yield results sooner and a partial run is still useful. The
-    # unlabelled bulk (mostly tiltak "best move" puzzles that are not tinues
-    # at all) is swept afterwards.
+    if scope == "tak-chain":
+        # Labelled rows first: those are the ones with a claim to correct, so
+        # they yield results sooner and a partial run is still useful. The
+        # unlabelled bulk (mostly tiltak "best move" puzzles that are not
+        # tinues at all) is swept afterwards.
+        order = ("(p.tinue_length_topaz IS NULL), s.size, "
+                 "COALESCE(p.tinue_length_topaz, 0), s.tps")
+    else:
+        # Full scope only *adds* information where tak-chain came up empty:
+        # restricted results are a subset of full, so a position tak-chain
+        # already proved is a known tinue either way. The rows where chain
+        # said no_tinue are exactly where gap tinues hide, so they go first —
+        # which means an interrupted full pass has still covered the half
+        # that matters.
+        order = ("(s.chain_verdict IS NOT 'no_tinue'), s.size, "
+                 "COALESCE(p.tinue_length_topaz, 0), s.tps")
     q = f"""
         SELECT s.tps, s.size, p.tinue_length_topaz
         FROM syntaks_solves s
         LEFT JOIN puzzles p ON p.tps = s.tps
         WHERE s.{col} IS NULL
-        ORDER BY (p.tinue_length_topaz IS NULL),
-                 s.size, COALESCE(p.tinue_length_topaz, 0), s.tps
+        ORDER BY {order}
     """
     if limit:
         q += f" LIMIT {limit}"
@@ -142,11 +153,24 @@ def pending(scope: str, limit: int | None) -> list[tuple[str, int, int | None]]:
     return rows
 
 
-def depth_for(scope: str, label: int | None, base: int, cap: int) -> int:
-    """Search past the label — it understates, so stopping at it would just
-    reproduce the bug. Unlabelled positions get the base depth."""
-    if scope != "tak-chain" or not label:
+def depth_for(scope: str, label: int | None, base: int, cap: int,
+              unlabelled: int) -> int:
+    """Depth budget for one position.
+
+    Labelled rows are searched past their label — it understates, so stopping
+    at it would just reproduce the bug being corrected.
+
+    Unlabelled rows get their own, shallower budget. They are rows the
+    original pipeline already ran Topaz over and found nothing, so a deep
+    tak-chain re-run mostly reconfirms Topaz at great expense (962 ms per
+    position at depth 13 versus 135 ms at depth 9). What actually adds
+    knowledge there is the full-scope pass, which sees gap tinues Topaz
+    cannot — so the budget is better spent on that.
+    """
+    if scope != "tak-chain":
         return base
+    if not label:
+        return unlabelled
     return min(cap, max(base, label + 4))
 
 
@@ -192,8 +216,8 @@ def write_rows(rows: list[tuple], scope: str) -> None:
     con.close()
 
 
-def do_pass(scope: str, base: int, cap: int, max_nodes: int, tt_bits: int,
-            workers: int, chunk_size: int, limit: int | None) -> None:
+def do_pass(scope: str, base: int, cap: int, unlabelled: int, max_nodes: int,
+            tt_bits: int, workers: int, chunk_size: int, limit: int | None) -> None:
     work = pending(scope, limit)
     if not work:
         print(f"{scope}: nothing pending", file=sys.stderr)
@@ -204,8 +228,8 @@ def do_pass(scope: str, base: int, cap: int, max_nodes: int, tt_bits: int,
     # board size in a process-global atomic, and one depth per invocation.
     buckets: dict[tuple[int, int], list] = {}
     for tps, size, label in work:
-        buckets.setdefault((size, depth_for(scope, label, base, cap)), []).append(
-            (tps, size, label))
+        d = depth_for(scope, label, base, cap, unlabelled)
+        buckets.setdefault((size, d), []).append((tps, size, label))
 
     chunks = [(list(v[i:i + chunk_size]), k[1])
               for k, v in buckets.items()
@@ -319,7 +343,10 @@ def main() -> int:
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--install", action="store_true", help="copy work DB back over the live one")
     ap.add_argument("--refresh-copy", action="store_true", help="re-copy live DB to work (discards progress)")
-    ap.add_argument("--base-depth", type=int, default=13)
+    ap.add_argument("--base-depth", type=int, default=13,
+                    help="floor for labelled rows; the depth used by the full pass")
+    ap.add_argument("--unlabelled-depth", type=int, default=9,
+                    help="tak-chain depth for rows with no original label (default 9)")
     ap.add_argument("--cap-depth", type=int, default=21)
     ap.add_argument("--max-nodes", type=int, default=2_000_000)
     ap.add_argument("--tt-bits", type=int, default=22)
@@ -337,8 +364,9 @@ def main() -> int:
 
     if args.which:
         scope = "tak-chain" if args.which == "chain" else "full"
-        do_pass(scope, args.base_depth, args.cap_depth, args.max_nodes,
-                args.tt_bits, args.workers, args.chunk_size, args.limit)
+        do_pass(scope, args.base_depth, args.cap_depth, args.unlabelled_depth,
+                args.max_nodes, args.tt_bits, args.workers, args.chunk_size,
+                args.limit)
     if args.apply:
         apply_labels()
     if args.report:
