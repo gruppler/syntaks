@@ -16,6 +16,7 @@
 //!
 //!   --scope full|tak-chain    move set to search (default: full)
 //!   --max-plies N             cap iterative deepening (default: solver's own)
+//!   --max-nodes N             per-depth node budget; 0 = unlimited (default)
 //!   --tt-bits N               TT size = 1<<N entries x 16 B (default: 20)
 //!   --root-move PTN           restrict the attacker's first move to this one
 //!   --prefilter-margin N      enable the sweep road-distance skip
@@ -53,12 +54,14 @@ use syntaks::takmove::Move;
 use syntaks::tinue::{self, Limits, Stats, TinueResult, TinueScope, Tt};
 
 const USAGE: &str = "usage: tinue \"<tps>\" [--scope full|tak-chain] [--max-plies N] \
-                     [--tt-bits N] [--root-move PTN] [--prefilter-margin N] [--quiet]";
+                     [--max-nodes N] [--tt-bits N] [--root-move PTN] \
+                     [--prefilter-margin N] [--batch] [--quiet]";
 
 struct Args {
     tps: String,
     scope: TinueScope,
     max_plies: Option<u32>,
+    max_nodes: Option<u64>,
     tt_bits: u32,
     root_move: Option<String>,
     prefilter_margin: Option<u32>,
@@ -71,6 +74,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         tps: String::new(),
         scope: TinueScope::Full,
         max_plies: None,
+        max_nodes: None,
         tt_bits: 20,
         root_move: None,
         prefilter_margin: None,
@@ -100,6 +104,13 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--max-plies" => {
                 let v = next("--max-plies")?;
                 args.max_plies = Some(v.parse().map_err(|_| format!("bad --max-plies {v:?}"))?);
+            }
+            "--max-nodes" => {
+                let v = next("--max-nodes")?;
+                let n: u64 = v.parse().map_err(|_| format!("bad --max-nodes {v:?}"))?;
+                // 0 spells "unlimited", matching the wasm binding's treatment
+                // of a non-positive budget.
+                args.max_nodes = (n > 0).then_some(n);
             }
             "--tt-bits" => {
                 let v = next("--tt-bits")?;
@@ -239,6 +250,9 @@ fn solve_one(tps: &str, args: &Args) -> Result<String, String> {
     };
     if let Some(mp) = args.max_plies {
         limits.max_plies = mp;
+    }
+    if let Some(mn) = args.max_nodes {
+        limits.max_nodes = mn;
     }
 
     // Parsed per position because move syntax depends on the board size that

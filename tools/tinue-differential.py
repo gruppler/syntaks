@@ -36,6 +36,40 @@ SYNTAKS = REPO / "target" / "release" / "tinue"
 GENPOS = REPO / "target" / "release" / "genpos"
 TOPAZ = REPO.parent / "topaz-tinue-web" / "target" / "release" / "topaz-tinue"
 CORPUS = REPO / "tests" / "data" / "puzzles.txt"
+DB_DEFAULT = pathlib.Path.home() / "MEGA" / "PTN" / "puzzles" / "puzzles.db"
+
+
+def load_db(count: int, path: pathlib.Path, min_len: int, max_len: int) -> list[tuple[int, str]]:
+    """Real-game positions from the labelled PlayTak puzzle database.
+
+    Only odd `tinue_length` rows are taken — a tinue always ends on the
+    attacker's move, so an even label is a labelling artefact.
+
+    The label bounds the *search*, not the truth: `tinue_length` is wrong on a
+    meaningful minority of rows (rows labelled 3 have been confirmed as mates
+    in 5, 7 and 9). Treat the DB as a source of real, contested positions, and
+    let the solver and the oracle decide the verdict.
+
+    Ordering is by rowid rather than random so a run is reproducible.
+    """
+    import sqlite3
+
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            """
+            SELECT g.size, p.tps
+            FROM puzzles p JOIN games g ON g.id = p.game_id
+            WHERE p.tinue_length IS NOT NULL
+              AND p.tinue_length % 2 = 1
+              AND p.tinue_length BETWEEN ? AND ?
+            LIMIT ?
+            """,
+            (min_len, max_len, count),
+        ).fetchall()
+    finally:
+        con.close()
+    return [(int(s), t) for s, t in rows]
 
 
 def run_syntaks(tps: str, scope: str, max_plies: int, tt_bits: int, timeout: float) -> dict | None:
@@ -99,10 +133,21 @@ def main() -> int:
     src.add_argument("--random", type=int, metavar="N", help="generate N random positions")
     src.add_argument("--file", type=pathlib.Path, metavar="PATH",
                      help="read positions from a file of '<size> <tps>' lines (genpos format)")
+    src.add_argument("--db", type=int, metavar="N",
+                     help="N real-game positions from the labelled PlayTak puzzle DB")
+    ap.add_argument("--db-path", type=pathlib.Path, default=DB_DEFAULT,
+                    help=f"puzzle DB location (default {DB_DEFAULT})")
+    ap.add_argument("--db-min-len", type=int, default=3,
+                    help="lower bound on the DB's tinue_length label (default 3)")
+    ap.add_argument("--db-max-len", type=int, default=7,
+                    help="upper bound on the DB's tinue_length label (default 7)")
     ap.add_argument("--size", type=int, default=5, help="board size for --random (default 5)")
     ap.add_argument("--gen-plies", type=int, default=24, help="random-game length (default 24)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--max-plies", type=int, default=5, help="search depth cap (default 5)")
+    ap.add_argument("--escalate-plies", type=int, default=25,
+                    help="depth to re-check at when Topaz claims a tinue we did not "
+                         "find at --max-plies (default 25)")
     ap.add_argument("--tt-bits", type=int, default=20)
     ap.add_argument("--timeout", type=float, default=120.0, help="per-position seconds")
     ap.add_argument("--skip-full", action="store_true",
@@ -116,6 +161,11 @@ def main() -> int:
 
     if args.corpus:
         cases = load_corpus()
+    elif args.db:
+        if not args.db_path.exists():
+            print(f"puzzle DB not found at {args.db_path}", file=sys.stderr)
+            return 2
+        cases = load_db(args.db, args.db_path, args.db_min_len, args.db_max_len)
     elif args.file:
         cases = []
         for line in args.file.read_text().splitlines():
@@ -139,16 +189,22 @@ def main() -> int:
             skipped += 1
             continue
 
-        # Topaz searches to its own depth, so compare the verdict only. A ply
-        # comparison would be meaningful only where both bounded the same way.
+        # Compare verdicts only. Topaz's `plies` is
+        # `principal_variation().len()` under df-pn — a PV length, not a
+        # proven mate distance, and df-pn does not return the shortest proof.
+        # It routinely understates: positions whose real mate is 9 ply have
+        # been observed reporting plies=3. Never branch on that number.
         if chain["verdict"] != topaz["verdict"]:
-            # Topaz is unbounded; syntaks is capped at --max-plies. A tinue
-            # deeper than the cap is a bounded-search artefact, not a
-            # disagreement, so only flag the case Topaz calls quiet.
-            if chain["verdict"] == "no_tinue" and topaz["verdict"] == "tinue" \
-                    and topaz["plies"] > args.max_plies:
-                skipped += 1
-                continue
+            # Topaz is unbounded; syntaks is capped at --max-plies, so a tinue
+            # deeper than the cap is a bounded-search artefact rather than a
+            # disagreement. Establish which it is by re-running syntaks deep
+            # instead of trusting Topaz's ply count.
+            if chain["verdict"] == "no_tinue" and topaz["verdict"] == "tinue":
+                deep = run_syntaks(tps, "tak-chain", args.escalate_plies,
+                                   args.tt_bits, args.timeout * 4)
+                if deep is None or deep["verdict"] == "tinue":
+                    skipped += 1
+                    continue
             mismatches += 1
             print(f"MISMATCH [{idx}] {tps}")
             print(f"   syntaks tak-chain: {chain['verdict']} plies={chain['plies']}")
