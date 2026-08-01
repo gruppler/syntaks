@@ -48,7 +48,7 @@ use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use syntaks::board::Position;
+use syntaks::board::{set_standard_reserves, Position};
 use syntaks::core::SIZE;
 use syntaks::takmove::Move;
 use syntaks::tinue::{self, Limits, Stats, TinueResult, TinueScope, Tt};
@@ -238,8 +238,12 @@ fn solve_one(tps: &str, args: &Args) -> Result<String, String> {
         return Err(format!("unsupported size {size} (only 5/6/7)"));
     }
 
-    // Global board geometry must be set before parsing or solving.
+    // Global board geometry must be set before parsing or solving. Reserves
+    // are a separate global from SIZE and do NOT follow it, so they have to
+    // be installed explicitly or a 5x5 position is solved with the 6x6
+    // reserve of 30 flats.
     SIZE.store(size, Ordering::Release);
+    set_standard_reserves(size);
 
     let parts: Vec<&str> = tps.split_whitespace().collect();
     let pos = Position::from_tps_parts(&parts).map_err(|e| format!("tps parse error: {e:?}"))?;

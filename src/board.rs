@@ -49,6 +49,35 @@ pub static FLATS: AtomicU8 = AtomicU8::new(DEFAULT_FLATS);
 pub static CAPS: AtomicU8 = AtomicU8::new(DEFAULT_CAPS);
 pub static KOMI_HALF: AtomicU32 = AtomicU32::new(DEFAULT_KOMI_HALF);
 
+/// Standard piece reserves for a board size, as `(flats, capstones)`.
+///
+/// Reserves live in the [`FLATS`]/[`CAPS`] globals rather than being derived
+/// from [`crate::core::SIZE`], because TEI lets a GUI override them for
+/// variant play. The consequence is that setting `SIZE` alone leaves the
+/// reserves at whatever they were — which for a fresh process is
+/// `DEFAULT_FLATS`/`DEFAULT_CAPS`, i.e. the 6x6 values. Any entry point that
+/// takes a board size from outside (a TPS, a wasm call) must therefore set
+/// reserves too; use [`set_standard_reserves`].
+#[must_use]
+pub const fn standard_reserves(size: u8) -> (u8, u8) {
+    match size {
+        3 => (10, 0),
+        4 => (15, 0),
+        5 => (21, 1),
+        6 => (30, 1),
+        7 => (40, 2),
+        _ => (50, 2),
+    }
+}
+
+/// Install the standard reserves for `size`. Call alongside `SIZE.store` on
+/// every path that parses a position from an external source.
+pub fn set_standard_reserves(size: u8) {
+    let (flats, caps) = standard_reserves(size);
+    FLATS.store(flats, atomic::Ordering::Release);
+    CAPS.store(caps, atomic::Ordering::Release);
+}
+
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 struct Keys {
     stacks: u64,

@@ -1143,6 +1143,8 @@ mod tests {
     fn parse(tps: &str, size: u8) -> (Position, MutexGuard<'static, ()>) {
         let guard = SIZE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         SIZE.store(size, Ordering::Release);
+        // Reserves live in their own globals and do not follow SIZE.
+        crate::board::set_standard_reserves(size);
         let parts: Vec<&str> = tps.split_whitespace().collect();
         (Position::from_tps_parts(&parts).expect("valid tps"), guard)
     }

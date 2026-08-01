@@ -2,7 +2,7 @@
  * syntaks, a TEI Tak engine — wasm bindings.
  */
 
-use crate::board::Position;
+use crate::board::{set_standard_reserves, Position};
 use crate::core::{Player, SIZE};
 use crate::tinue::{
     self, AbortReason, FlatOutcome, Limits, MoveScoreKind, TinueResult, TinueScope, Tt,
@@ -148,6 +148,9 @@ fn parse_position(tps: &str, size: u8) -> Result<Position, String> {
         return Err(format!("unsupported size {} (only 5/6/7)", size));
     }
     SIZE.store(size, Ordering::Release);
+    // Reserves are a separate global and do not follow SIZE; without this a
+    // 5x5 solve runs with 30 flats per player instead of 21.
+    set_standard_reserves(size);
     let parts: Vec<&str> = tps.split_whitespace().collect();
     Position::from_tps_parts(&parts).map_err(|e| format!("tps parse: {:?}", e))
 }

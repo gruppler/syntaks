@@ -18,7 +18,7 @@
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 
-use syntaks::board::{FlatCountOutcome, Position};
+use syntaks::board::{set_standard_reserves, FlatCountOutcome, Position};
 use syntaks::core::{Player, SIZE};
 use syntaks::movegen::generate_moves;
 use syntaks::takmove::Move;
@@ -82,6 +82,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     SIZE.store(size, Ordering::Release);
+    set_standard_reserves(size);
 
     let mut rng = SplitMix64(seed);
     let mut moves: Vec<Move> = Vec::with_capacity(256);

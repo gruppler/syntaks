@@ -18,7 +18,7 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
-use syntaks::board::Position;
+use syntaks::board::{set_standard_reserves, Position};
 use syntaks::core::SIZE;
 use syntaks::tinue::{solve_with_tt, Limits, TinueResult, TinueScope, Tt};
 
@@ -71,6 +71,7 @@ fn run_corpus(max_plies: u32) {
 
     for case in cases {
         SIZE.store(case.size, Ordering::Release);
+        set_standard_reserves(case.size);
         let tps_parts: Vec<&str> = case.tps.split_whitespace().collect();
         let pos = Position::from_tps_parts(&tps_parts)
             .unwrap_or_else(|e| panic!("tps parse failed for {:?}: {:?}", case.tps, e));
@@ -125,6 +126,7 @@ fn tak_chain_results_are_a_subset_of_full() {
 
     for case in cases {
         SIZE.store(case.size, Ordering::Release);
+        set_standard_reserves(case.size);
         let tps_parts: Vec<&str> = case.tps.split_whitespace().collect();
         let pos = Position::from_tps_parts(&tps_parts)
             .unwrap_or_else(|e| panic!("tps parse failed for {:?}: {:?}", case.tps, e));
