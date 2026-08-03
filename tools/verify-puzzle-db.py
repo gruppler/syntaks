@@ -124,12 +124,14 @@ def pending(scope: str, limit: int | None) -> list[tuple[str, int, int | None]]:
     col = "chain_verdict" if scope == "tak-chain" else "full_verdict"
     con = sqlite3.connect(f"file:{WORK}?mode=ro", uri=True)
     if scope == "tak-chain":
-        # Labelled rows first: those are the ones with a claim to correct, so
-        # they yield results sooner and a partial run is still useful. The
-        # unlabelled bulk (mostly tiltak "best move" puzzles that are not
-        # tinues at all) is swept afterwards.
-        order = ("(p.tinue_length_topaz IS NULL), s.size, "
-                 "COALESCE(p.tinue_length_topaz, 0), s.tps")
+        # Cheapest first. Depth is assigned from the label, and cost grows
+        # steeply with it — a depth-17 position runs ~1000x a depth-9 one
+        # because the tak-chain threat check is O(moves^2) per node. Ordering
+        # deep rows first (the previous behaviour) meant the run spent hours
+        # on a few thousand hard positions while 90% of the database sat
+        # untouched. Unlabelled rows sort to the front since they take the
+        # shallow budget.
+        order = ("COALESCE(p.tinue_length_topaz, 0), s.size, s.tps")
     else:
         # Full scope only *adds* information where tak-chain came up empty:
         # restricted results are a subset of full, so a position tak-chain
