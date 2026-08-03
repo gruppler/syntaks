@@ -254,6 +254,28 @@ def do_pass(scope: str, base: int, cap: int, unlabelled: int, max_nodes: int,
             print(f"  {done}/{len(work)}  {rate:.1f}/s  eta {eta:.0f}m", flush=True)
 
 
+def requeue_aborted(scope: str) -> None:
+    """Clear results for rows that hit the node cap so they are searched again.
+
+    Aborted rows are the whole reason a two-tier strategy works: a cheap cap
+    resolves ~99% of positions quickly and parks the rest honestly, then this
+    requeues just that tail for a run with a real budget. Because an aborted
+    row never overwrites `tinue_length`, nothing incorrect is published in the
+    meantime.
+    """
+    pre = "chain" if scope == "tak-chain" else "full"
+    con = sqlite3.connect(WORK)
+    n = con.execute(
+        f"select count(*) from syntaks_solves where {pre}_verdict = 'aborted'").fetchone()[0]
+    con.execute(
+        f"""UPDATE syntaks_solves SET {pre}_verdict=NULL, {pre}_plies=NULL, {pre}_pv=NULL,
+            {pre}_nodes=NULL, {pre}_max_plies=NULL, {pre}_ms=NULL
+            WHERE {pre}_verdict = 'aborted'""")
+    con.commit()
+    con.close()
+    print(f"requeued {n} aborted {scope} rows", file=sys.stderr)
+
+
 def apply_labels() -> None:
     """Rewrite puzzles.tinue_length from the verified tak-chain result."""
     con = sqlite3.connect(WORK)
@@ -343,6 +365,9 @@ def main() -> int:
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--install", action="store_true", help="copy work DB back over the live one")
     ap.add_argument("--refresh-copy", action="store_true", help="re-copy live DB to work (discards progress)")
+    ap.add_argument("--retry-aborted", action="store_true",
+                    help="requeue rows that hit the node cap, for a second pass "
+                         "with a larger --max-nodes")
     ap.add_argument("--base-depth", type=int, default=13,
                     help="floor for labelled rows; the depth used by the full pass")
     ap.add_argument("--unlabelled-depth", type=int, default=9,
@@ -361,6 +386,9 @@ def main() -> int:
 
     ensure_work_copy(args.refresh_copy)
     seed_positions()
+
+    if args.retry_aborted:
+        requeue_aborted("tak-chain" if args.which == "chain" else "full")
 
     if args.which:
         scope = "tak-chain" if args.which == "chain" else "full"
