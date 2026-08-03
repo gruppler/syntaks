@@ -53,7 +53,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 TINUE = REPO / "target" / "release" / "tinue"
@@ -231,9 +231,15 @@ def do_pass(scope: str, base: int, cap: int, unlabelled: int, max_nodes: int,
         d = depth_for(scope, label, base, cap, unlabelled)
         buckets.setdefault((size, d), []).append((tps, size, label))
 
-    chunks = [(list(v[i:i + chunk_size]), k[1])
+    # Chunk size shrinks with depth. A deep bucket can take ~13 s per position,
+    # so a flat 400 would mean a single chunk running for well over an hour —
+    # far too coarse to checkpoint against, and far too coarse to report on.
+    def sized(depth: int) -> int:
+        return max(20, chunk_size // max(1, 2 ** ((depth - 9) // 4)))
+
+    chunks = [(list(v[i:i + sized(k[1])]), k[1])
               for k, v in buckets.items()
-              for i in range(0, len(v), chunk_size)]
+              for i in range(0, len(v), sized(k[1]))]
     print(f"{scope}: {len(chunks)} chunks over {len(buckets)} (size,depth) buckets",
           file=sys.stderr)
 
@@ -242,12 +248,12 @@ def do_pass(scope: str, base: int, cap: int, unlabelled: int, max_nodes: int,
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(run_chunk, c, scope, d, max_nodes, tt_bits): len(c)
                 for c, d in chunks}
-        for fut in futs:
-            pass
-        for fut, n in list(futs.items()):
-            rows = fut.result()
-            write_rows(rows, scope)
-            done += n
+        # as_completed, not submission order: awaiting in order would leave
+        # finished chunks unwritten behind one slow chunk, so a crash could
+        # discard hours of completed work and progress would read as stalled.
+        for fut in as_completed(futs):
+            write_rows(fut.result(), scope)
+            done += futs[fut]
             el = time.time() - t0
             rate = done / el if el else 0
             eta = (len(work) - done) / rate / 60 if rate else 0
