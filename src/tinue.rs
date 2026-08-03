@@ -59,17 +59,49 @@ struct TtEntry {
 /// Transposition table for the tinue search. Reusable across calls — pass
 /// the same `Tt` to multiple `solve_with_tt` invocations to share the cache
 /// (e.g. when sweeping a whole game). Sized to `1 << bits` entries × 16 B.
+/// Memo for "does the side to move have a road-in-1 here?", the question
+/// [`Searcher::road_in_1_move`] answers.
+///
+/// `key == 0` marks an unused slot; `mv == 0` is a cached *negative* (no such
+/// move exists), which is the common and expensive answer to recompute since
+/// it means every move was tried and rejected.
+#[derive(Copy, Clone, Default)]
+struct TakEntry {
+    key: u64,
+    mv: u16,
+}
+
 pub struct Tt {
     entries: Vec<TtEntry>,
     mask: usize,
+    /// See [`TakEntry`]. Lives in the `Tt` rather than the searcher because a
+    /// searcher is rebuilt for every iterative-deepening iteration, and this
+    /// table is far too large to reallocate per depth.
+    tak: Vec<TakEntry>,
+    tak_mask: usize,
 }
 
 impl Tt {
     pub fn new(bits: u32) -> Self {
         let size = 1usize << bits;
+        // Deliberately small — 4 MB, not a fraction of the main table.
+        //
+        // Measured on deep positions this memo is worth about 1.1x, far less
+        // than expected, and the reason caps its useful size: the queries do
+        // not transpose. At an attacker node the question is asked about
+        // `child.apply_nullmove()` for each child, and those keys are unique
+        // per child, so every query inside a single iteration is a first
+        // visit. The only reuse is across iterative-deepening iterations, and
+        // the deepest iteration — which dominates the work — is all misses.
+        //
+        // A bigger table therefore buys almost nothing while costing real
+        // memory in the browser, where this ships via wasm.
+        let tak_size = 1usize << bits.clamp(10, 18);
         Self {
             entries: vec![TtEntry::default(); size],
             mask: size - 1,
+            tak: vec![TakEntry::default(); tak_size],
+            tak_mask: tak_size - 1,
         }
     }
 
@@ -77,10 +109,36 @@ impl Tt {
         for e in &mut self.entries {
             *e = TtEntry::default();
         }
+        for e in &mut self.tak {
+            *e = TakEntry::default();
+        }
     }
 
     fn idx(&self, key: u64) -> usize {
         (key as usize) & self.mask
+    }
+
+    /// `Some(answer)` on a hit, `None` when the position is not cached.
+    ///
+    /// The answer is a pure function of the position — the Zobrist key covers
+    /// the board and the side to move, and reserves are derived from the
+    /// board — so no scope or attacker namespacing is needed here, unlike the
+    /// main table whose verdicts are relative to the searcher.
+    fn probe_tak(&self, key: u64) -> Option<Option<Move>> {
+        let e = self.tak[(key as usize) & self.tak_mask];
+        if e.key == key && key != 0 {
+            Some(Move::from_raw(e.mv))
+        } else {
+            None
+        }
+    }
+
+    fn store_tak(&mut self, key: u64, mv: Option<Move>) {
+        let idx = (key as usize) & self.tak_mask;
+        self.tak[idx] = TakEntry {
+            key,
+            mv: mv.map_or(0, |m| m.raw()),
+        };
     }
 
     fn probe(&self, key: u64) -> Option<TtEntry> {
@@ -382,6 +440,17 @@ impl<'a, 'b> Searcher<'a, 'b> {
     /// `apply_move`, and `generate_moves` emits placements first, so the
     /// cheap answers are tried before the expensive ones.
     fn road_in_1_move(&mut self, pos: &Position) -> Option<Move> {
+        // Memoised: this is called once per candidate move at every
+        // restricted node, and its cost is O(moves) with an `apply_move` per
+        // spread — so a node costs O(moves^2) board applications without the
+        // cache. Positions repeat heavily across the search (the same reason
+        // the transposition table pays off), and a cached answer is exact
+        // rather than depth-bounded, so a hit is always usable.
+        let key = pos.key();
+        if let Some(hit) = self.tt.probe_tak(key) {
+            return hit;
+        }
+
         let stm = pos.stm();
         let roads = pos.roads(stm);
 
@@ -404,6 +473,7 @@ impl<'a, 'b> Searcher<'a, 'b> {
         }
 
         self.threat_buf = buf;
+        self.tt.store_tak(key, found);
         found
     }
 
@@ -1185,14 +1255,30 @@ mod tests {
         );
     }
 
-    fn solve_scoped(tps: &str, size: u8, scope: TinueScope, max_plies: u32) -> TinueResult {
-        let (pos, _guard) = parse(tps, size);
+    /// Returns the guard alongside the result, and callers must bind it.
+    ///
+    /// Dropping it at the end of this function would be a trap: `Move`'s
+    /// `Display` renders a spread's drop counts relative to
+    /// `Position::carry_limit()`, which reads the global `SIZE`. A caller that
+    /// released the lock here and only then formatted a move from the PV could
+    /// have another test's `SIZE.store` land in between and render the move at
+    /// the wrong board size. That produced an intermittent failure in
+    /// `full_finds_a_gap_tinue_that_no_tak_chain_reaches` — the verdict was
+    /// right, the move string was formatted for the wrong board.
+    #[must_use]
+    fn solve_scoped(
+        tps: &str,
+        size: u8,
+        scope: TinueScope,
+        max_plies: u32,
+    ) -> (TinueResult, MutexGuard<'static, ()>) {
+        let (pos, guard) = parse(tps, size);
         let limits = Limits {
             max_plies,
             scope,
             ..Default::default()
         };
-        solve(&pos, &limits).0
+        (solve(&pos, &limits).0, guard)
     }
 
     // ---- TinueScope::TakChain -------------------------------------------
@@ -1202,7 +1288,7 @@ mod tests {
         // Alion's 5x5 mate-in-5 is a strict tak chain, so restricting the
         // move set must not change the verdict or the distance — only the
         // node count (roughly 7x fewer at the time of writing).
-        let result = solve_scoped(
+        let (result, _guard) = solve_scoped(
             "1,x3,2/2,1C,x2,2/1,1,x2,2/x,1,2C,2,2/x2,1,1,1 2 8",
             5,
             TinueScope::TakChain,
@@ -1223,7 +1309,7 @@ mod tests {
         // Cheap despite the depth-9 budget — the restriction collapses the
         // tree to a few hundred nodes — which is why this runs by default
         // while its full-mode twin stays `#[ignore]`d.
-        let result = solve_scoped(
+        let (result, _guard) = solve_scoped(
             "1,122121S,1,1,1/x,2S,1S,1,1/12,x4/2,2,x,221C,2S/2,2,2,12C,1S 1 24",
             5,
             TinueScope::TakChain,
@@ -1239,7 +1325,7 @@ mod tests {
     #[test]
     fn tak_chain_rejects_the_morten_5s_gap_tinue() {
         // Second known mate-in-9 gap tinue; same expectation as above.
-        let result = solve_scoped(
+        let (result, _guard) = solve_scoped(
             "2,2221S,2,x2/2,x,2,221S,2/x2,2,x2/12C,2,x,1,x/1221S,1,21121C,1,1 1 28",
             5,
             TinueScope::TakChain,
@@ -1257,7 +1343,7 @@ mod tests {
         // A mate-in-one is a degenerate tak chain. The attacker restriction
         // filters on "leaves a live threat", so a move that *is* the road
         // must be exempted — otherwise the shortest tinues would vanish.
-        let result = solve_scoped("x5/x5/x5/x5/1,1,1,1,x 1 5", 5, TinueScope::TakChain, 1);
+        let (result, _guard) = solve_scoped("x5/x5/x5/x5/1,1,1,1,x 1 5", 5, TinueScope::TakChain, 1);
         match result {
             TinueResult::Tinue { plies, .. } => assert_eq!(plies, 1),
             other => panic!("expected mate in 1, got {:?}", other),
@@ -1277,19 +1363,22 @@ mod tests {
 
     #[test]
     fn full_finds_a_gap_tinue_that_no_tak_chain_reaches() {
-        match solve_scoped(GAP_TINUE_5PLY, 5, TinueScope::Full, 5) {
+        // The guard must outlive the `to_string()` below; see `solve_scoped`.
+        let (full, guard) = solve_scoped(GAP_TINUE_5PLY, 5, TinueScope::Full, 5);
+        match full {
             TinueResult::Tinue { plies, pv, .. } => {
                 assert_eq!(plies, 5);
                 assert_eq!(pv[0].to_string(), "3b3+", "the quiet key move");
             }
             other => panic!("full mode must find this mate in 5, got {:?}", other),
         }
+        drop(guard);
 
         // Searched well past the mate distance to show the restriction is
         // what excludes it, not the depth budget.
         assert!(
             matches!(
-                solve_scoped(GAP_TINUE_5PLY, 5, TinueScope::TakChain, 11),
+                solve_scoped(GAP_TINUE_5PLY, 5, TinueScope::TakChain, 11).0,
                 TinueResult::NoTinue { .. }
             ),
             "the winning first move is quiet, so no tak chain can reach this win"
