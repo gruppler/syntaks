@@ -1,9 +1,15 @@
 # Syntaks tinue solver — upgrade plan
 
-> **Status.** Upgrade 1 (tak-chain scope) is implemented on the `tinue-solver`
-> branch, together with the sweep pre-filter, the native CLI, and the wasm
-> scope parameter. Upgrade 2 (df-pn) and the PTN-Ninja wiring are **not** done.
-> The branch rename described at the bottom is already complete.
+> **Status (2026-08-08).** Upgrade 1 (tak-chain scope) is implemented on the
+> `tinue-solver` branch, together with the sweep pre-filter, the native CLI, and
+> the wasm scope parameter. **The PTN-Ninja wiring is now done too**, on that
+> repo's `tinue` branch. Upgrade 2 (df-pn) is **not** done. The branch rename
+> described at the bottom is already complete.
+>
+> **The PTN-Ninja UX section below is superseded** — see "Scope is derived, not
+> configured". Measurement killed the persistent scope toggle it proposed:
+> under any budget, full scope finds *fewer* tinues than restricted, so scope
+> is no longer a user setting.
 >
 > Corrections made while executing, each marked inline below: the defender
 > restriction is implemented by rechecking the resulting position rather than
@@ -197,6 +203,101 @@ proven/no-tinue cache: the cache short-circuits repeated positions; the pre-filt
 avoids the solver entirely on clearly-hopeless ones. (Don't assume road-distance
 is monotonic across the game — captures/spreads can push it back up — so compute
 it per position.)
+
+---
+
+## Scope is derived, not configured (supersedes the toggle in "PTN-Ninja UX")
+
+The UX section above proposes a persistent "find quiet tinues" toggle. Measuring
+it killed it. Over **120 6×6 positions** at depth 9 under a 500k node cap:
+
+| | resolved | tinues found | aborted | median/position |
+|---|---|---|---|---|
+| tak-chain | **100%** | **17** | **0** | **47 ms** |
+| full | 24% | 14 | 91 | 9,739 ms |
+
+Full scope found *fewer* tinues. Widening the move set widens the tree faster
+than it finds the win: three tinues that restricted scope proved in under 2k
+nodes were lost to aborts after 500k. It also surfaced **zero** quiet tinues,
+which is what you would expect when only 7 are known across a 113k-position
+database.
+
+The same comparison over 240 mostly-5×5 positions gave 100%/51% resolved and
+35/32 tinues — same conclusion, weaker margin. **6×6 is the harder case and the
+one that matters competitively**, so the 6×6 numbers are the ones quoted here;
+be wary of the corpus, which is 82% 5×5 by row count and will silently
+dominate any unfiltered query.
+
+So quiet search is never worth spending a budget on. It is worth running only
+where there is no budget to spend. Scope therefore follows the *mode*:
+
+| mode | scope | limits |
+|---|---|---|
+| sweep (game/branch) | strict | depth 11, 50k nodes |
+| analyze position | strict | depth 11, 50k nodes |
+| interactive | strict, **then** quiet | strict bounded as above; the quiet extension is unbounded |
+
+The quiet extension runs only as a continuation of a *completed* strict search
+that found nothing. A strict tinue is already the whole answer — across 32
+positions where both scopes proved one, full scope never returned a shorter
+mate — and an aborted strict search means quiet has no hope either. The strict
+phase stays bounded even in interactive mode, or it would never terminate on a
+hard position and the extension would never start; nothing is lost, because the
+quiet phase searches every move at unbounded depth and so subsumes deep strict
+search.
+
+Defaults come from the same corpus, read 6×6-only: depth 3 proves 31% of tinues
+and depth 11 proves **96.7%** (91.5% across all sizes). For the node cap, 10k
+resolves 87% of 6×6 positions, 50k resolves 91.5%, and 500k adds 0.5 points
+beyond that — so 50k is the knee and the rest is a tail no budget clears.
+
+This also gives the "label a restricted no_tinue honestly" requirement a home:
+strict-empty renders "no strict tinuë — a quiet tinuë may still exist", and
+upgrades to "no tinuë" once the quiet extension completes. The distinction
+becomes visible progress instead of a setting nobody understands.
+
+---
+
+## Tinue origin — when did the win become forced?
+
+Given a tinue at position P, the earliest position from which the win was
+already forced is found by walking **backward** over the attacker's turns,
+solving each, until one is *not* a tinue. The tinue began at the position after
+that one.
+
+**Why it is cheap.** P−2's winning subtree largely contains P's, so once P is
+solved the backward searches are heavily cached — each step back reuses the TT
+rather than being an independent solve. It is also a natural extension of the
+backward iteration `sweepGame` already performs. With the strict profile at
+~50 ms/position, a 20-ply backward walk is around a second before any TT reuse
+is counted.
+
+**UI.** Two shapes, not exclusive:
+
+- *Passive* — as the user scrubs backward the tinue mark persists on each
+  still-forced position and winks out at the boundary. The visual gap **is** the
+  origin, and it reuses marking that is already displayed.
+- *Active* — a "jump to origin" action, and/or shading the span of plies over
+  which the win was already forced: "Tinuë forced from move X."
+
+Prefer the passive form, augmented by the jump action.
+
+**Two caveats that determine whether the answer is true.**
+
+1. **The origin is scope-relative.** A strict walk finds where the *tak-chain*
+   tinue began. If a quiet tinue preceded it, the reported origin is later than
+   the truth. Label it accordingly ("forced from move X (strict)") rather than
+   presenting a bare move number.
+2. **An under-powered search manufactures a false boundary.** The origin is
+   exactly the point where the search flips to no-tinue, so any position the
+   budget or depth fails to resolve reads as "not forced" and terminates the
+   walk early. At depth 3 — which proves only 30% of tinues — the reported
+   origin would be confidently, systematically too late. This is the first
+   feature where a weak default does not merely miss things, it produces a
+   specific wrong number, and it is the strongest argument for the depth-11 /
+   10k-node profile above. Aborted positions must be treated as *unknown* and
+   stop the walk with an explicit "couldn't determine", never silently as "not
+   a tinue".
 
 ---
 
