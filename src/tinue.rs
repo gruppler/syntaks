@@ -1159,11 +1159,11 @@ pub fn road_distance(pos: &Position, player: Player) -> Option<u32> {
 fn order_attacker_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player) {
     let before_road_pop = pos.roads(attacker).popcount() as i32;
     moves.sort_by_cached_key(|&mv| {
-        let after = pos.apply_move(mv);
-        if after.has_road(attacker) {
+        let after = pos.roads_after(mv, attacker);
+        if crate::road::has_road(after) {
             return -1000i32;
         }
-        let delta = after.roads(attacker).popcount() as i32 - before_road_pop;
+        let delta = after.popcount() as i32 - before_road_pop;
         if delta > 0 {
             return -10 * delta;
         }
@@ -1176,13 +1176,16 @@ fn order_attacker_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player)
 /// tinue outright), then moves that strip attacker road pieces (sliding
 /// off a stack, smashing under a cap), then spreads, then placements.
 fn order_defender_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player) {
+    let defender = attacker.flip();
     let attacker_road_before = pos.roads(attacker).popcount() as i32;
     moves.sort_by_cached_key(|&mv| {
-        let after = pos.apply_move(mv);
-        if after.has_road(attacker.flip()) {
+        // One walk yields both sides — the defender's own roads decide the
+        // outright refutation, the attacker's decide how much was stripped.
+        let after = pos.roads_after_pair(mv);
+        if crate::road::has_road(after[defender.idx()]) {
             return -1000i32;
         }
-        let stripped = attacker_road_before - after.roads(attacker).popcount() as i32;
+        let stripped = attacker_road_before - after[attacker.idx()].popcount() as i32;
         if stripped > 0 {
             return -10 * stripped;
         }

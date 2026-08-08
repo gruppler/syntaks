@@ -20,7 +20,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
 use syntaks::board::{set_standard_reserves, Position};
-use syntaks::core::SIZE;
+use syntaks::core::{Player, SIZE};
 use syntaks::movegen::generate_moves;
 
 static SIZE_LOCK: Mutex<()> = Mutex::new(());
@@ -42,12 +42,32 @@ fn check_spreads(pos: &Position) -> usize {
 
     let mut checked = 0;
     for &mv in &buf {
+        let after = pos.apply_move(mv);
+
+        // `roads_after` is checked for BOTH players, not just the mover.
+        // Move ordering needs the opponent's road bitboard too — the
+        // defender ordering scores a reply by how many attacker road
+        // pieces it strips — and the two sides are not symmetric: a drop
+        // that adds a square to one player removes it from the other.
+        for player in [Player::P1, Player::P2] {
+            let expected = after.roads(player);
+            let actual = pos.roads_after(mv, player);
+            assert_eq!(
+                actual,
+                expected,
+                "roads_after disagreed with apply_move\n  \
+                 move: {mv:?}\n  player: {player:?}\n  tps: {}\n  \
+                 expected (oracle): {expected:?}\n  actual: {actual:?}",
+                pos.tps(),
+            );
+        }
+
         if !mv.is_spread() {
             continue;
         }
         checked += 1;
 
-        let expected = pos.apply_move(mv).has_road(stm);
+        let expected = after.has_road(stm);
         let actual = pos.spread_completes_road(mv);
 
         assert_eq!(

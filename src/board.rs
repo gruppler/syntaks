@@ -289,6 +289,113 @@ impl Position {
         current_size()
     }
 
+    /// `player`'s road bitboard in the position that `mv` would produce,
+    /// derived without building that position.
+    ///
+    /// Equivalent to `self.apply_move(mv).roads(player)`, and the general
+    /// form of [`Position::spread_completes_road`]. Move ordering asks this
+    /// once per candidate move at every node, for the mover *and* for the
+    /// opponent, so answering it with a real `apply_move` made ordering
+    /// cost O(moves) board copies per node.
+    ///
+    /// `player` is free rather than implied because the two sides are not
+    /// symmetric: a drop that hands a square to one player takes it from
+    /// the other, and the defender ordering scores replies by how many
+    /// *attacker* road squares they strip.
+    #[must_use]
+    pub fn roads_after(&self, mv: Move, player: Player) -> Bitboard {
+        self.roads_after_pair(mv)[player.idx()]
+    }
+
+    /// Both players' road bitboards after `mv`, indexed by [`Player::idx`].
+    ///
+    /// The squares a move touches are the same for both sides — a drop that
+    /// hands a square to one player takes it from the other — so deriving
+    /// the pair costs one walk instead of two. Defender move ordering needs
+    /// exactly this: the defender's own roads (does the reply just win?)
+    /// and the attacker's (how much does it strip?).
+    #[must_use]
+    pub fn roads_after_pair(&self, mv: Move) -> [Bitboard; Player::COUNT] {
+        let mut roads = [self.roads(Player::P1), self.roads(Player::P2)];
+
+        // Give `sq` to `owner`, taking it from the other side.
+        #[inline]
+        fn claim(roads: &mut [Bitboard; Player::COUNT], sq: Square, owner: usize) {
+            roads[owner].set_sq(sq);
+            roads[owner ^ 0x1].clear_sq(sq);
+        }
+
+        if !mv.is_spread() {
+            // Placements land on an empty square, so nothing is displaced.
+            // During the opening swap a player places their opponent's
+            // piece, which is why the owner is derived rather than assumed.
+            let placed_by = if self.ply() < 2 {
+                self.stm().flip()
+            } else {
+                self.stm()
+            };
+            if mv.pt().is_road() {
+                claim(&mut roads, mv.sq(), placed_by.idx());
+            }
+            return roads;
+        }
+
+        let stm = self.stm();
+        let src = mv.sq();
+        let dir = mv.dir();
+
+        let pattern = mv.pattern();
+        let dropped = pattern.trailing_zeros();
+        let taken = Self::carry_limit() as u32 - dropped;
+        let mut pattern = pattern >> dropped;
+
+        let src_players = self.stacks.players(src);
+        let new_height = self.stacks.height(src) as u32 - taken;
+        let top = self.stacks.top(src).unwrap();
+        let mut players = src_players >> new_height;
+
+        // Source: the carried pieces leave. Anything buried is necessarily
+        // a flat — only the top of a stack is ever a wall or capstone — so
+        // the square belongs to whoever is newly exposed, and to nobody
+        // when the stack empties.
+        roads[0].clear_sq(src);
+        roads[1].clear_sq(src);
+        if new_height > 0 {
+            let exposed = ((src_players >> (new_height - 1)) & 0x1) as usize;
+            claim(&mut roads, src, exposed);
+        }
+
+        let mut sq = src.shift(dir).unwrap();
+        for _ in 0..taken {
+            let owner = (players & 0x1) as usize;
+
+            pattern >>= 1;
+            players >>= 1;
+
+            // A set bit ends this square's group: the piece just dropped is
+            // its new top, and every intermediate drop is a flat — so the
+            // owner alone decides, whatever was underneath.
+            if (pattern & 0x1) != 0 {
+                claim(&mut roads, sq, owner);
+                sq = sq.shift(dir).unwrap();
+            }
+        }
+
+        // The final square keeps the carried top piece, owned by the mover.
+        // It is the only square whose piece *type* can matter: a wall never
+        // carries a road, a flat or capstone always does.
+        if top.is_road() {
+            claim(&mut roads, sq, stm.idx());
+        } else {
+            // A wall on the final square carries no road for either side,
+            // and covers whatever was there.
+            roads[0].clear_sq(sq);
+            roads[1].clear_sq(sq);
+        }
+
+        roads
+    }
+
     /// Does the spread `mv` complete a road for the side to move?
     ///
     /// Equivalent to `self.apply_move(mv).has_road(self.stm())`, but derives
@@ -313,6 +420,11 @@ impl Position {
     ///   definition, since controlling the source stack is what made the
     ///   spread legal in the first place.
     #[must_use]
+    /// Kept as its own single-player walk rather than delegating to
+    /// [`Position::roads_after_pair`]. This is `road_in_1_move`'s inner
+    /// loop and the hottest path in restricted search; routing it through
+    /// the two-player walk measured ~9% slower there, which is a poor
+    /// trade for removing 40 lines. The differential test covers both.
     pub fn spread_completes_road(&self, mv: Move) -> bool {
         debug_assert!(mv.is_spread());
         debug_assert_eq!(self.stacks.top_player(mv.sq()), Some(self.stm()));
