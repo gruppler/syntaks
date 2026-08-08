@@ -33,7 +33,7 @@
 //! outputs stay index-aligned even when a position fails to parse.
 //!
 //! `--scope tak-chain` restricts the search to strict tak chains. A `no_tinue`
-//! under that scope means "no tak-chain tinue"; gap tinues are excluded by
+//! under that scope means "no tak-chain tinue"; quiet tinues are excluded by
 //! construction, so it is not evidence that the position is quiet.
 //!
 //! `--root-move` verifies one candidate without deep-searching every other

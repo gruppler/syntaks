@@ -194,7 +194,7 @@ const ATTACKER_KEY_MASK_P2: u64 = 1u64 << 63;
 ///
 /// A `TakChain` `NoWin` is the *weaker* claim "no tak-chain win at this
 /// depth"; a `Full` `NoWin` is "no win at all at this depth". Letting a full
-/// search read a restricted `NoWin` would silently discard exactly the gap
+/// search read a restricted `NoWin` would silently discard exactly the quiet
 /// tinues full mode exists to find. (`Win` entries are compatible in the
 /// other direction — a restricted proof is a real proof — but the two are
 /// kept fully disjoint rather than relying on flag-by-flag reasoning.)
@@ -266,9 +266,9 @@ pub enum AbortReason {
 /// *what counts as a tinue*, not merely how fast it is found.
 ///
 /// * [`TinueScope::Full`] searches every legal move for both sides. It finds
-///   every forced road win, including *gap tinues* whose winning line passes
+///   every forced road win, including *quiet tinues* whose winning line passes
 ///   through a quiet move that threatens nothing (`archvenison_2026_05_24`
-///   and `morten_5s_tinue_2` in this module's tests are both mate-in-9 gap
+///   and `morten_5s_tinue_2` in this module's tests are both mate-in-9 quiet
 ///   tinues).
 /// * [`TinueScope::TakChain`] restricts the attacker to moves that leave a
 ///   live road-in-1 threat, and the defender to replies that answer it. This
@@ -321,7 +321,7 @@ pub struct Limits<'a> {
     /// extra winners (if any) land in `TinueResult::Tinue::winning_first_moves`.
     pub find_all_winners: bool,
     /// Move-set restriction. See [`TinueScope`]. Defaults to `Full` so that
-    /// existing callers keep the complete (gap-tinue-finding) semantics.
+    /// existing callers keep the complete (quiet-tinue-finding) semantics.
     pub scope: TinueScope,
     /// **Sweep-only** heuristic pre-filter. When `Some(margin)`, a position
     /// whose attacker [`road_distance`] exceeds the attacker's move budget
@@ -677,7 +677,7 @@ impl<'a, 'b> Searcher<'a, 'b> {
 
             // Tak-chain scope: the attacker may only play moves that leave a
             // live road threat. A move that threatens nothing breaks the
-            // chain — and those quiet moves are precisely what gap tinues
+            // chain — and those quiet moves are precisely what quiet tinues
             // are built on, which is why this scope cannot find them.
             //
             // An outright road win was already returned above, so this can
@@ -1263,7 +1263,7 @@ mod tests {
     /// released the lock here and only then formatted a move from the PV could
     /// have another test's `SIZE.store` land in between and render the move at
     /// the wrong board size. That produced an intermittent failure in
-    /// `full_finds_a_gap_tinue_that_no_tak_chain_reaches` — the verdict was
+    /// `full_finds_a_quiet_tinue_that_no_tak_chain_reaches` — the verdict was
     /// right, the move string was formatted for the wrong board.
     #[must_use]
     fn solve_scoped(
@@ -1301,7 +1301,7 @@ mod tests {
     }
 
     #[test]
-    fn tak_chain_rejects_the_archvenison_gap_tinue() {
+    fn tak_chain_rejects_the_archvenison_quiet_tinue() {
         // The counterpart to `archvenison_2026_05_24`: full mode proves a
         // mate in 9, but the winning line opens with a quiet move, so no tak
         // chain reaches it. Topaz reports no_tinue here for the same reason.
@@ -1317,14 +1317,14 @@ mod tests {
         );
         assert!(
             matches!(result, TinueResult::NoTinue { .. }),
-            "tak-chain scope must not find the gap tinue, got {:?}",
+            "tak-chain scope must not find the quiet tinue, got {:?}",
             result
         );
     }
 
     #[test]
-    fn tak_chain_rejects_the_morten_5s_gap_tinue() {
-        // Second known mate-in-9 gap tinue; same expectation as above.
+    fn tak_chain_rejects_the_morten_5s_quiet_tinue() {
+        // Second known mate-in-9 quiet tinue; same expectation as above.
         let (result, _guard) = solve_scoped(
             "2,2221S,2,x2/2,x,2,221S,2/x2,2,x2/12C,2,x,1,x/1221S,1,21121C,1,1 1 28",
             5,
@@ -1333,7 +1333,7 @@ mod tests {
         );
         assert!(
             matches!(result, TinueResult::NoTinue { .. }),
-            "tak-chain scope must not find the gap tinue, got {:?}",
+            "tak-chain scope must not find the quiet tinue, got {:?}",
             result
         );
     }
@@ -1350,21 +1350,21 @@ mod tests {
         }
     }
 
-    /// A real mate-in-5 **gap tinue** from a PlayTak game, whose winning first
+    /// A real mate-in-5 **quiet tinue** from a PlayTak game, whose winning first
     /// move `3b3+` threatens nothing — so no tak chain reaches it at any
     /// depth. Sourced from the `topaz_missed_tinues` table of the labelled
     /// puzzle database, i.e. a position independently flagged as one Topaz
     /// could not find.
     ///
-    /// This is the shallowest gap tinue on hand, which makes it the fixture
+    /// This is the shallowest quiet tinue on hand, which makes it the fixture
     /// that keeps the scope tests cheap: full mode proves it in ~20k nodes,
     /// while restricted mode refuses it in ~23.
-    const GAP_TINUE_5PLY: &str = "2,2,x,x,1/2,2,x,1,x/x,212,1,x,x/x,1,1,x,x/1,x,x,x,x 2 8";
+    const QUIET_TINUE_5PLY: &str = "2,2,x,x,1/2,2,x,1,x/x,212,1,x,x/x,1,1,x,x/1,x,x,x,x 2 8";
 
     #[test]
-    fn full_finds_a_gap_tinue_that_no_tak_chain_reaches() {
+    fn full_finds_a_quiet_tinue_that_no_tak_chain_reaches() {
         // The guard must outlive the `to_string()` below; see `solve_scoped`.
-        let (full, guard) = solve_scoped(GAP_TINUE_5PLY, 5, TinueScope::Full, 5);
+        let (full, guard) = solve_scoped(QUIET_TINUE_5PLY, 5, TinueScope::Full, 5);
         match full {
             TinueResult::Tinue { plies, pv, .. } => {
                 assert_eq!(plies, 5);
@@ -1378,7 +1378,7 @@ mod tests {
         // what excludes it, not the depth budget.
         assert!(
             matches!(
-                solve_scoped(GAP_TINUE_5PLY, 5, TinueScope::TakChain, 11).0,
+                solve_scoped(QUIET_TINUE_5PLY, 5, TinueScope::TakChain, 11).0,
                 TinueResult::NoTinue { .. }
             ),
             "the winning first move is quiet, so no tak chain can reach this win"
@@ -1390,13 +1390,13 @@ mod tests {
         // Regression for the TT namespace split, on the case that actually
         // hurts. A TakChain `NoWin` is the weaker claim "no tak-chain win";
         // sharing a key space would let the restricted pass below convince
-        // the full pass that this position is quiet — and since it is a gap
+        // the full pass that this position is quiet — and since it is a quiet
         // tinue, full mode is the only thing that can see the win at all.
         //
         // Ordering matters: restricted runs first precisely so its `NoWin`
         // entries are already in the table when full mode probes the same
         // positions.
-        let (pos, _guard) = parse(GAP_TINUE_5PLY, 5);
+        let (pos, _guard) = parse(QUIET_TINUE_5PLY, 5);
         let mut tt = Tt::new(TT_DEFAULT_BITS);
 
         let restricted = Limits {
@@ -1407,7 +1407,7 @@ mod tests {
         let (early, _) = solve_with_tt(&pos, &restricted, &mut tt);
         assert!(
             matches!(early, TinueResult::NoTinue { .. }),
-            "restricted mode cannot see a gap tinue, got {:?}",
+            "restricted mode cannot see a quiet tinue, got {:?}",
             early
         );
 
@@ -1603,7 +1603,7 @@ mod tests {
     #[ignore]
     fn archvenison_2026_05_24() {
         // "archvenison 24-05-26" (PlayTak, 2026-05-24) — P1 to move.
-        // A *non-tak-chain* (gap) tinue: the forced win passes through a quiet
+        // A *non-tak-chain* (quiet) tinue: the forced win passes through a quiet
         // non-threatening move, so a tak-chain-only solver (e.g. Topaz) reports
         // no_tinue. syntaks's full-width search finds it. Confirmed mate-in-9
         // (unassisted solve: 8.5M nodes, ~8 min).

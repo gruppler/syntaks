@@ -1,4 +1,4 @@
-# Gap tinues: forced road wins whose winning FIRST move threatens nothing.
+# Quiet tinues: forced road wins whose winning FIRST move threatens nothing.
 # Format: <size> <verified_plies> <quiet_first_move> <tps>
 #
 # These are the positions that separate TinueScope::Full from
@@ -19,7 +19,7 @@
 # a scarce fixture set rather than something regenerable on demand.
 #
 # The two named deep examples in src/tinue.rs (archvenison_2026_05_24 and
-# morten_5s_tinue_2) are both mate-in-9 gap tinues from the same family.
+# morten_5s_tinue_2) are both mate-in-9 quiet tinues from the same family.
 5 5 3b3+ 2,2,x,x,1/2,2,x,1,x/x,212,1,x,x/x,1,1,x,x/1,x,x,x,x 2 8
 5 7 2e5<11 112112,x,2121222,x,12C/1S,2,1S,x,x/2,1C,1,1,x/2,1,1,x,x/112,2,112,x,1 2 31
 5 7 Cd2 2,x,x,x,12/x,x,121,x,1/x,2,x,1,x/x,x,121,x,221/x,x,x,x,22221 1 19

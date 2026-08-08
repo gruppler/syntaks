@@ -9,7 +9,7 @@ difference of opinion.
 The script also checks the one-directional invariant that does not involve
 Topaz at all: **restricted results are a subset of full results.** A position
 that is tinue under ``tak-chain`` must be tinue under ``full``. The converse
-may fail freely — that gap is where gap tinues live.
+may fail freely — that asymmetry is where quiet tinues live.
 
 Usage::
 

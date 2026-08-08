@@ -123,7 +123,7 @@ fn flat_outcome_str(outcome: FlatOutcome) -> &'static str {
 
 /// Map the JS `scope` argument onto [`TinueScope`]. `undefined`/`null` and
 /// the empty string mean `full`, so callers written before the scope toggle
-/// existed keep the complete (gap-tinue-finding) semantics they had.
+/// existed keep the complete (quiet-tinue-finding) semantics they had.
 fn parse_scope(scope: Option<String>) -> Result<TinueScope, String> {
     match scope.as_deref().map(str::trim) {
         None | Some("") => Ok(TinueScope::Full),
@@ -173,7 +173,7 @@ fn error_response(message: String) -> JsValue {
 /// / negative = no cap). Returns `{ outcome: { kind, ... }, nodes }`.
 ///
 /// `scope` is `"full"` (default when omitted) or `"tak-chain"`. Under
-/// `"tak-chain"` a `no_tinue` outcome means **no tak-chain tinue** — a gap
+/// `"tak-chain"` a `no_tinue` outcome means **no tak-chain tinue** — a quiet
 /// tinue may still exist — so the UI must label it as such rather than
 /// claiming the position is not tinue.
 #[wasm_bindgen]

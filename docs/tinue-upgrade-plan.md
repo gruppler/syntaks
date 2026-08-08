@@ -15,7 +15,7 @@
 > `topaz-tinue-web` oracle — **0 verdict mismatches**. A further 1,000
 > contested positions were solved under both scopes: 103 tinues found
 > identically by each with matching ply counts, **0 subset violations**, and
-> 0 gap tinues at depth ≤ 7 (both known gap tinues are mate-in-9, so this is
+> 0 quiet tinues at depth ≤ 7 (both known quiet tinues are mate-in-9, so this is
 > the expected result — they are exotic). Harness:
 > `tools/tinue-differential.py`, positions from `genpos`.
 >
@@ -24,7 +24,7 @@
 
 Two upgrades, driven by the syntaks-vs-Topaz comparison (see the `tinue-benchmark`
 branch and the `../topaz-tinue-web` oracle crate). Goal: one solver that is both
-**fast on strict tinues** (Topaz's strength) and **complete** (finds gap/non-tak
+**fast on strict tinues** (Topaz's strength) and **complete** (finds quiet/non-tak
 tinues — proven real via `morten_5s`, a mate-in-9 whose first move `c2` is quiet).
 
 ## Background: the two axes are orthogonal
@@ -42,7 +42,7 @@ Topaz's speed came from *two separable* choices; syntaks can adopt them independ
 `{ID, df-pn} × {full, restricted}` = four valid configurations. The two use cases pick different corners:
 
 - **Full-game sweep** (mark tak/tinue per ply): **restricted + ID**. Restriction = the conventional tinue mark and keeps branching tiny; ID gives the exact short mate distance the UI shows. Fast enough without df-pn.
-- **Deep single-position** ("is there a forced win here?"): **full + df-pn**. Completeness (gap tinues) with df-pn taming the branching; recover shortest distance with a bounded ID pass only if the UI needs it.
+- **Deep single-position** ("is there a forced win here?"): **full + df-pn**. Completeness (quiet tinues) with df-pn taming the branching; recover shortest distance with a bounded ID pass only if the UI needs it.
 
 ---
 
@@ -52,7 +52,7 @@ Add a restricted mode to the solver, selected via `Limits`.
 
 ### Solver changes (`src/tinue.rs`)
 - Add `pub enum TinueScope { Full, TakChain }` (or `restrict_tak_chain: bool`) to `Limits`.
-- **TT namespacing (not in the original plan, required for soundness).** A `TakChain` `NoWin` entry is the *weaker* claim "no tak-chain win at this depth"; a `Full` `NoWin` means "no win at all". Because the sweep shares one `Tt` across many `solve_with_tt` calls, a full search could probe a restricted `NoWin` and discard exactly the gap tinues it exists to find. Scope is therefore XOR'd into the TT key alongside the existing attacker mask, keeping the two namespaces disjoint. `score_moves` takes a `scope` for the same reason.
+- **TT namespacing (not in the original plan, required for soundness).** A `TakChain` `NoWin` entry is the *weaker* claim "no tak-chain win at this depth"; a `Full` `NoWin` means "no win at all". Because the sweep shares one `Tt` across many `solve_with_tt` calls, a full search could probe a restricted `NoWin` and discard exactly the quiet tinues it exists to find. Scope is therefore XOR'd into the TT key alongside the existing attacker mask, keeping the two namespaces disjoint. `score_moves` takes a `scope` for the same reason.
 - **Attacker nodes** (`search_attacker`): when restricted, filter generated moves to those that create a tak (road-in-1) threat. Need a `tak_threats(pos)` helper: for each attacker move, does the resulting position give the attacker a `has_road`-in-one continuation? (Topaz's `get_tak_threats` is the reference; syntaks has `has_road` to build on.) If no tak threats → this node is a loss (`DefenderHolds`), mirroring Topaz's `NoTakThreats`.
 - **Defender nodes** (`search_defender`): when restricted, discard replies that fail to address the attacker's road threat. **Implemented as verify-by-recheck, not as a geometric filter**: generate every legal reply, then ask the *resulting position* whether the attacker still has a road-in-1. Deciding this from the move's shape (source/target square vs. a "road-relevance zone") is the pruning that was reverted as unsound — it ignored a spread's intermediate drop squares, so a spread that blocked via a middle square looked irrelevant and got pruned, producing false tinues. Consulting the position instead cannot be fooled that way.
   - A discarded reply is **recorded as a 2-ply loss**, not dropped: an AND node must still account for every child, and a node where *every* reply loses this way would otherwise look childless and be misread as `DefenderHolds`.
@@ -63,7 +63,7 @@ Add a restricted mode to the solver, selected via `Limits`.
 - Full mode is a *superset*: any restricted-mode tinue must also be a full-mode tinue (regression check).
 
 ### Soundness note
-Restricted mode proves *"a tak-chain tinue exists"*. A restricted `no_tinue` does **not** imply no tinue (gap tinues excluded). The UI must label it accordingly (see PTN-Ninja section).
+Restricted mode proves *"a tak-chain tinue exists"*. A restricted `no_tinue` does **not** imply no tinue (quiet tinues excluded). The UI must label it accordingly (see PTN-Ninja section).
 
 ---
 
@@ -118,10 +118,10 @@ Two user-facing knobs, both *answer-shaped*. The algorithm (ID vs df-pn) is
 **not** one of them — it stays fully automatic beneath these.
 
 1. **Scope (tak-chain vs full)** — **persistent user-facing toggle** in the
-   syntaks engine settings: e.g. "Find gap tinues (slower)" on/off, defaulting per
+   syntaks engine settings: e.g. "Find quiet tinues (slower)" on/off, defaulting per
    mode (sweep → tak-chain; deep → full). Changes *what counts as a tinue*, so the
    user must own it. When restricted mode returns no tinue, label it
-   "no tak-chain tinue" — not "no tinue" — so a gap tinue isn't implied absent.
+   "no tak-chain tinue" — not "no tinue" — so a quiet tinue isn't implied absent.
 2. **Depth-of-answer — "Quick check" vs "Full solve"** — surfaced as an
    **escalation**, not a persistent setting. This is the user-meaningful
    projection of the algorithm choice (Quick check ⇒ df-pn existence proof;
@@ -205,7 +205,7 @@ it per position.)
 - `../topaz-tinue-web` = correctness oracle for restricted mode (must match exactly).
 - Cross-checks: restricted ⊆ full; df-pn verdicts == ID verdicts; recovered
   shortest == ID shortest.
-- Keep `morten_5s` (mate-in-9 gap tinue) as the canonical full-mode-only case:
+- Keep `morten_5s` (mate-in-9 quiet tinue) as the canonical full-mode-only case:
   full mode finds it, restricted mode must report "no tak-chain tinue".
 - Random-position differential testing native (fast, no wasm round-trip).
 

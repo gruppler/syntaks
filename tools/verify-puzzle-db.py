@@ -24,9 +24,9 @@ keeps its original meaning — with the previous value preserved in a new
 `tinue_length_topaz` column. Nothing is destroyed.
 
 Full-scope results live in their own columns rather than driving
-`tinue_length`, because full scope also finds *gap tinues* (wins whose first
+`tinue_length`, because full scope also finds *quiet tinues* (wins whose first
 move threatens nothing), which Topaz cannot see by construction. Where full
-finds a win and tak-chain does not, `gap_tinue` is set.
+finds a win and tak-chain does not, `quiet_tinue` is set.
 
 ## Safety
 
@@ -69,13 +69,13 @@ CREATE TABLE IF NOT EXISTS syntaks_solves (
     chain_nodes   INTEGER, chain_max_plies INTEGER, chain_ms REAL,
     full_verdict  TEXT, full_plies INTEGER, full_pv TEXT,
     full_nodes    INTEGER, full_max_plies INTEGER, full_ms REAL,
-    gap_tinue     INTEGER,
+    quiet_tinue     INTEGER,
     road_distance INTEGER,
     engine        TEXT,
     verified_at   INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_solves_chain ON syntaks_solves(chain_verdict, chain_plies);
-CREATE INDEX IF NOT EXISTS idx_solves_gap   ON syntaks_solves(gap_tinue);
+CREATE INDEX IF NOT EXISTS idx_solves_quiet ON syntaks_solves(quiet_tinue);
 """
 
 
@@ -136,7 +136,7 @@ def pending(scope: str, limit: int | None) -> list[tuple[str, int, int | None]]:
         # Full scope only *adds* information where tak-chain came up empty:
         # restricted results are a subset of full, so a position tak-chain
         # already proved is a known tinue either way. The rows where chain
-        # said no_tinue are exactly where gap tinues hide, so they go first —
+        # said no_tinue are exactly where quiet tinues hide, so they go first —
         # which means an interrupted full pass has still covered the half
         # that matters.
         order = ("(s.chain_verdict IS NOT 'no_tinue'), s.size, "
@@ -166,7 +166,7 @@ def depth_for(scope: str, label: int | None, base: int, cap: int,
     original pipeline already ran Topaz over and found nothing, so a deep
     tak-chain re-run mostly reconfirms Topaz at great expense (962 ms per
     position at depth 13 versus 135 ms at depth 9). What actually adds
-    knowledge there is the full-scope pass, which sees gap tinues Topaz
+    knowledge there is the full-scope pass, which sees quiet tinues Topaz
     cannot — so the budget is better spent on that.
     """
     if scope != "tak-chain":
@@ -288,7 +288,7 @@ def apply_labels() -> None:
     """Rewrite puzzles.tinue_length from the verified tak-chain result."""
     con = sqlite3.connect(WORK)
     con.execute("""
-        UPDATE syntaks_solves SET gap_tinue =
+        UPDATE syntaks_solves SET quiet_tinue =
             CASE WHEN full_verdict='tinue' AND chain_verdict='no_tinue' THEN 1
                  WHEN full_verdict IS NOT NULL AND chain_verdict IS NOT NULL THEN 0
                  ELSE NULL END
@@ -325,7 +325,7 @@ def report() -> None:
     for label, sql in [
         ("chain verdicts", "select chain_verdict, count(*) from syntaks_solves group by 1"),
         ("full verdicts", "select full_verdict, count(*) from syntaks_solves group by 1"),
-        ("gap tinues", "select gap_tinue, count(*) from syntaks_solves group by 1"),
+        ("quiet tinues", "select quiet_tinue, count(*) from syntaks_solves group by 1"),
     ]:
         print(f"{label}: {dict((str(a), b) for a, b in q(sql))}")
     print("\n=== label corrections (vs tinue_length_topaz) ===")

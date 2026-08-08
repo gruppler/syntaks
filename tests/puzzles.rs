@@ -114,7 +114,7 @@ fn puzzles_fast() {
 /// it can never be *shorter* than the full search's shortest mate.
 ///
 /// The converse is deliberately not asserted — the corpus may well contain
-/// gap tinues, which full mode finds and restricted mode is defined to miss.
+/// quiet tinues, which full mode finds and restricted mode is defined to miss.
 /// That asymmetry is the whole point of having two scopes.
 #[test]
 fn tak_chain_results_are_a_subset_of_full() {
