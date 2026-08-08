@@ -289,6 +289,83 @@ impl Position {
         current_size()
     }
 
+    /// Does the spread `mv` complete a road for the side to move?
+    ///
+    /// Equivalent to `self.apply_move(mv).has_road(self.stm())`, but derives
+    /// the mover's resulting road bitboard straight from the drop pattern
+    /// rather than building the successor position — no board copy, no stack
+    /// mutation, no incremental key updates. The tinue solver asks this once
+    /// per candidate spread at every restricted node, so the successor it
+    /// used to build was discarded immediately after a single `has_road`.
+    ///
+    /// A spread can only change road membership on the squares it touches:
+    ///
+    /// * **Source.** The carried pieces leave. Whatever is buried underneath
+    ///   is necessarily a flat — only the top of a stack is ever a wall or
+    ///   capstone — so the square rejoins the mover's roads exactly when the
+    ///   newly exposed piece is theirs, and leaves them when the stack empties.
+    /// * **Intermediate drops.** Always flats, covering whatever was there
+    ///   (a wall included). The last piece dropped on a square is its new top,
+    ///   so membership follows from that piece's owner alone.
+    /// * **Final square.** The only square that keeps the carried top piece,
+    ///   and so the only one whose piece *type* matters: a wall never carries
+    ///   a road, a flat or capstone always does. Its owner is the mover by
+    ///   definition, since controlling the source stack is what made the
+    ///   spread legal in the first place.
+    #[must_use]
+    pub fn spread_completes_road(&self, mv: Move) -> bool {
+        debug_assert!(mv.is_spread());
+        debug_assert_eq!(self.stacks.top_player(mv.sq()), Some(self.stm()));
+
+        let stm = self.stm();
+        let src = mv.sq();
+        let dir = mv.dir();
+
+        let pattern = mv.pattern();
+        let dropped = pattern.trailing_zeros();
+        let taken = Self::carry_limit() as u32 - dropped;
+        let mut pattern = pattern >> dropped;
+
+        let src_players = self.stacks.players(src);
+        let new_height = self.stacks.height(src) as u32 - taken;
+        let top = self.stacks.top(src).unwrap();
+        let mut players = src_players >> new_height;
+
+        let mut roads = self.roads(stm);
+
+        roads.clear_sq(src);
+        if new_height > 0 && ((src_players >> (new_height - 1)) & 0x1) as u8 == stm.raw() {
+            roads.set_sq(src);
+        }
+
+        let mut sq = src.shift(dir).unwrap();
+        for _ in 0..taken {
+            let owner = (players & 0x1) as u8;
+
+            pattern >>= 1;
+            players >>= 1;
+
+            // A set bit ends this square's group: the piece just dropped is
+            // its new top, and it is a flat.
+            if (pattern & 0x1) != 0 {
+                if owner == stm.raw() {
+                    roads.set_sq(sq);
+                } else {
+                    roads.clear_sq(sq);
+                }
+                sq = sq.shift(dir).unwrap();
+            }
+        }
+
+        if top.is_road() {
+            roads.set_sq(sq);
+        } else {
+            roads.clear_sq(sq);
+        }
+
+        has_road(roads)
+    }
+
     #[must_use]
     #[inline]
     pub fn komi_half() -> u32 {

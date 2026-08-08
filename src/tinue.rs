@@ -433,19 +433,19 @@ impl<'a, 'b> Searcher<'a, 'b> {
     /// i.e. `pos` is "tak" for them. Returns the completing move so callers
     /// can record an exact PV; `None` if no such move exists.
     ///
-    /// Placements are answered without applying the move: a flat or capstone
-    /// on an empty square `s` changes the mover's road bitboard to exactly
-    /// `roads | s`, so one `has_road` on that union settles it. Walls never
-    /// extend a road and are skipped outright. Only spreads need a real
-    /// `apply_move`, and `generate_moves` emits placements first, so the
-    /// cheap answers are tried before the expensive ones.
+    /// No move is ever applied. A flat or capstone on an empty square `s`
+    /// changes the mover's road bitboard to exactly `roads | s`, so one
+    /// `has_road` on that union settles a placement; walls never extend a
+    /// road and are skipped outright; and spreads go through
+    /// [`Position::spread_completes_road`], which derives the resulting road
+    /// bitboard from the drop pattern. Every branch is now bitboard work
+    /// against `pos` itself, so the whole scan touches one position.
     fn road_in_1_move(&mut self, pos: &Position) -> Option<Move> {
         // Memoised: this is called once per candidate move at every
-        // restricted node, and its cost is O(moves) with an `apply_move` per
-        // spread — so a node costs O(moves^2) board applications without the
-        // cache. Positions repeat heavily across the search (the same reason
-        // the transposition table pays off), and a cached answer is exact
-        // rather than depth-bounded, so a hit is always usable.
+        // restricted node, so a node costs O(moves^2) of this scan. Positions
+        // repeat heavily across the search (the same reason the transposition
+        // table pays off), and a cached answer is exact rather than
+        // depth-bounded, so a hit is always usable.
         let key = pos.key();
         if let Some(hit) = self.tt.probe_tak(key) {
             return hit;
@@ -460,7 +460,7 @@ impl<'a, 'b> Searcher<'a, 'b> {
         let mut found = None;
         for &mv in &buf {
             let completes = if mv.is_spread() {
-                pos.apply_move(mv).has_road(stm)
+                pos.spread_completes_road(mv)
             } else if mv.pt() == PieceType::Wall {
                 false
             } else {
