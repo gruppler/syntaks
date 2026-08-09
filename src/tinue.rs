@@ -1619,6 +1619,58 @@ mod tests {
     }
 
     #[test]
+    fn analyze_defenses_proves_a_double_threat_lost() {
+        // P1 threatens two roads at once — e1 completes rank 1, a5 completes
+        // file a — so no single P2 reply covers both. Every defence must come
+        // back as a 2-ply loss: the reply, then the road.
+        let (pos, _guard) = parse("x5/1,x4/1,x4/1,x4/1,1,1,1,x 2 5", 5);
+        let limits = Limits {
+            max_plies: 3,
+            ..Default::default()
+        };
+        let mut tt = Tt::new(TT_DEFAULT_BITS);
+        let (report, _) = analyze_defenses(&pos, Player::P1, &limits, &mut tt);
+
+        assert!(report.lost, "double threat should be lost for P2");
+        assert_eq!(report.plies, 2, "road comes on the attacker's next ply");
+        assert!(!report.defenses.is_empty());
+        for d in &report.defenses {
+            assert!(
+                matches!(d.kind, DefenseKind::Loses { plies: 2 }),
+                "{} scored {:?}, expected Loses {{ plies: 2 }}",
+                d.mv,
+                d.kind
+            );
+            assert_eq!(d.pv.len(), 2, "{} pv should reach the road", d.mv);
+            assert_eq!(d.pv[0], d.mv, "pv starts with the defence itself");
+        }
+    }
+
+    #[test]
+    fn analyze_defenses_stops_at_a_reply_that_holds() {
+        // One threat only: P2 blocks e1 and survives. The report must not
+        // claim the position is lost, and it stops as soon as it has the
+        // survivor rather than scoring the whole move list.
+        let (pos, _guard) = parse("x5/x5/x5/x5/1,1,1,1,x 2 5", 5);
+        let limits = Limits {
+            max_plies: 3,
+            ..Default::default()
+        };
+        let mut tt = Tt::new(TT_DEFAULT_BITS);
+        let (report, _) = analyze_defenses(&pos, Player::P1, &limits, &mut tt);
+
+        assert!(!report.lost, "a blocking reply exists");
+        assert_eq!(report.plies, 0);
+        assert!(
+            report
+                .defenses
+                .iter()
+                .any(|d| !matches!(d.kind, DefenseKind::Loses { .. })),
+            "the survivor should be in the list"
+        );
+    }
+
+    #[test]
     fn score_moves_marks_winning_first_move() {
         // Mate-in-one: P1 places on e1 to complete a rank-1 road. After
         // solving, score_moves should report `Win { plies: 1 }` for that
@@ -1912,6 +1964,149 @@ pub fn solve_one_depth<'a>(
             )
         }
     }
+}
+
+/// How one reply fails, from a position with the DEFENDER to move.
+///
+/// `plies` counts from before the reply, matching [`MoveScoreKind`]: 1 is a
+/// reply that completes the attacker's road on the spot, 2 one that leaves a
+/// road the attacker takes on the next ply.
+#[derive(Copy, Clone, Debug)]
+pub enum DefenseKind {
+    Loses { plies: u32 },
+    /// No attacker win within the budget — the reply survives the horizon,
+    /// wins for the defender outright, or ends the game on flats.
+    Holds,
+    /// The node budget ran out before this reply was resolved.
+    Unknown,
+}
+
+#[derive(Clone, Debug)]
+pub struct DefenseScore {
+    pub mv: Move,
+    pub kind: DefenseKind,
+    /// Starts with `mv`. Best-effort past that: the continuation is
+    /// reconstructed from the TT, which is free to be missing entries.
+    pub pv: Vec<Move>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DefenseReport {
+    /// One entry per reply examined, in defender-ordering order. Complete
+    /// only when `lost` — the search stops at the first survivor.
+    pub defenses: Vec<DefenseScore>,
+    /// Every legal reply loses.
+    pub lost: bool,
+    /// The longest resistance among the replies, in plies from before the
+    /// reply, which is the attacker's win length from `pos`. 0 unless `lost`.
+    pub plies: u32,
+}
+
+/// Search every legal reply at `pos`, where the DEFENDER is to move, and
+/// report how each one fails.
+///
+/// The defender-side counterpart to [`solve`]. Unlike [`score_moves`] it does
+/// not report what the TT happens to hold: each reply's subtree is searched,
+/// which is what makes "every reply loses" a proof rather than a summary of
+/// past search effort. Two things make that necessary — a scoped search never
+/// visits the replies that lose to the immediate road, so they are never
+/// stored, and stored entries are evicted by later work.
+///
+/// Stops at the first reply not proven to lose, since one survivor already
+/// settles the question. Costs proportional to the whole move list only when
+/// the position really is lost; defender ordering puts the likely survivors
+/// first, so a position that holds usually resolves in a handful of subtrees.
+pub fn analyze_defenses(
+    pos: &Position,
+    attacker: Player,
+    limits: &Limits<'_>,
+    tt: &mut Tt,
+) -> (DefenseReport, Stats) {
+    let defender = attacker.flip();
+    if pos.stm() != defender {
+        return (
+            DefenseReport {
+                defenses: Vec::new(),
+                lost: false,
+                plies: 0,
+            },
+            Stats::default(),
+        );
+    }
+
+    let mut moves = Vec::with_capacity(64);
+    generate_moves(&mut moves, pos);
+    order_defender_moves(pos, &mut moves, attacker);
+
+    // One fewer ply than the budget for this position: the reply spends one.
+    let child_plies = limits.max_plies.saturating_sub(1);
+    let mut searcher = Searcher::new(attacker, limits, tt);
+    let mut defenses = Vec::with_capacity(moves.len());
+    let mut lost = !moves.is_empty();
+    let mut worst = 0;
+
+    for &mv in &moves {
+        let next = pos.apply_move(mv);
+
+        let (kind, mut line) = if next.has_road(defender) {
+            // Current-player-wins: the defender's own road ends it in their
+            // favour even when the same move exposes the attacker's.
+            (DefenseKind::Holds, Vec::new())
+        } else if next.has_road(attacker) {
+            (DefenseKind::Loses { plies: 1 }, Vec::new())
+        } else if !matches!(next.count_flats(), FlatCountOutcome::None) {
+            // A game that ends on flats ends without a road, so it refutes
+            // the tinue whoever it favours.
+            (DefenseKind::Holds, Vec::new())
+        } else {
+            let mut found = (DefenseKind::Holds, Vec::new());
+            let mut depth = 1;
+            while depth <= child_plies {
+                let mut line = Vec::with_capacity(depth as usize);
+                match searcher.search_attacker(&next, depth, &mut line) {
+                    NodeOutcome::AttackerWins(plies) => {
+                        searcher.extend_pv_via_tt(&next, &mut line, plies as usize);
+                        line.truncate(plies as usize);
+                        found = (DefenseKind::Loses { plies: plies + 1 }, line);
+                        break;
+                    }
+                    NodeOutcome::Aborted => {
+                        found = (DefenseKind::Unknown, Vec::new());
+                        break;
+                    }
+                    NodeOutcome::DefenderHolds => {}
+                }
+                depth += 2;
+            }
+            found
+        };
+
+        let mut pv = Vec::with_capacity(line.len() + 1);
+        pv.push(mv);
+        pv.append(&mut line);
+        defenses.push(DefenseScore { mv, kind, pv });
+
+        match kind {
+            DefenseKind::Loses { plies } => worst = worst.max(plies),
+            _ => {
+                lost = false;
+                break;
+            }
+        }
+    }
+
+    let nodes = searcher.nodes.load(Ordering::Relaxed);
+    (
+        DefenseReport {
+            defenses,
+            lost,
+            plies: if lost { worst } else { 0 },
+        },
+        Stats {
+            nodes,
+            max_depth_reached: limits.max_plies,
+        },
+    )
 }
 
 /// Solve for a tinue at `pos` reusing the caller's TT. Pass the same `tt` to

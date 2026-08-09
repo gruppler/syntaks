@@ -5,7 +5,7 @@
 use crate::board::{set_standard_reserves, Position};
 use crate::core::{Player, SIZE};
 use crate::tinue::{
-    self, AbortReason, FlatOutcome, Limits, MoveScoreKind, TinueResult, TinueScope, Tt,
+    self, AbortReason, DefenseKind, FlatOutcome, Limits, MoveScoreKind, TinueResult, TinueScope, Tt,
 };
 use serde::Serialize;
 use serde_wasm_bindgen::Serializer;
@@ -111,6 +111,41 @@ struct MoveScoreEntry {
     mv: String,
     #[serde(flatten)]
     kind: MoveScoreEntryKind,
+}
+
+/// One reply and how it fails, surfaced to JS by
+/// [`TinueSolver::analyze_defenses`]. Mirrors [`DefenseKind`], with `plies`
+/// counted from before the reply so it reads on the same scale as
+/// [`MoveScoreEntryKind`].
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum DefenseEntryKind {
+    Loses { plies: u32 },
+    Holds,
+    Unknown,
+}
+
+#[derive(Serialize)]
+struct DefenseEntry {
+    #[serde(rename = "move")]
+    mv: String,
+    #[serde(flatten)]
+    kind: DefenseEntryKind,
+    /// Starts with the reply itself and runs to the road where the TT can
+    /// supply it.
+    pv: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct DefenseResponse {
+    /// Every legal reply loses. The `defenses` list is complete only then —
+    /// the search stops at the first survivor.
+    lost: bool,
+    /// The attacker's win length from this position, in plies. 0 unless
+    /// `lost`.
+    plies: u32,
+    defenses: Vec<DefenseEntry>,
+    nodes: u64,
 }
 
 fn flat_outcome_str(outcome: FlatOutcome) -> &'static str {
@@ -347,5 +382,65 @@ impl TinueSolver {
             })
             .collect();
         to_js(&entries)
+    }
+
+    /// Search every legal reply at `tps`, where the side to move is the
+    /// DEFENDER, and report how each one fails. Returns
+    /// `{ lost, plies, defenses: [{ move, kind, plies?, pv }], nodes }`.
+    ///
+    /// Unlike `score_moves` this searches rather than reading the TT, so it
+    /// answers on a cold table and its `lost` is a proof. It shares the
+    /// solver's TT, which makes the common case — a position whose parent
+    /// was just proven — mostly TT hits.
+    ///
+    /// `max_plies` is the budget from this position, one ply of which the
+    /// reply itself spends. `max_nodes` covers the whole call, not each
+    /// reply; exhausting it leaves the remaining replies `unknown`, which
+    /// keeps `lost` false rather than claiming a proof the budget did not
+    /// buy.
+    pub fn analyze_defenses(
+        &mut self,
+        tps: &str,
+        size: u8,
+        attacker_p1: bool,
+        max_plies: u32,
+        max_nodes: f64,
+        scope: Option<String>,
+    ) -> JsValue {
+        let pos = match parse_position(tps, size) {
+            Ok(p) => p,
+            Err(message) => return error_response(message),
+        };
+        let scope = match parse_scope(scope) {
+            Ok(s) => s,
+            Err(message) => return error_response(message),
+        };
+        let attacker = if attacker_p1 { Player::P1 } else { Player::P2 };
+        let limits = Limits {
+            max_plies,
+            max_nodes: parse_max_nodes(max_nodes),
+            scope,
+            ..Default::default()
+        };
+        let (report, stats) = tinue::analyze_defenses(&pos, attacker, &limits, &mut self.tt);
+        let defenses: Vec<DefenseEntry> = report
+            .defenses
+            .into_iter()
+            .map(|d| DefenseEntry {
+                mv: d.mv.to_string(),
+                kind: match d.kind {
+                    DefenseKind::Loses { plies } => DefenseEntryKind::Loses { plies },
+                    DefenseKind::Holds => DefenseEntryKind::Holds,
+                    DefenseKind::Unknown => DefenseEntryKind::Unknown,
+                },
+                pv: d.pv.iter().map(|m| m.to_string()).collect(),
+            })
+            .collect();
+        to_js(&DefenseResponse {
+            lost: report.lost,
+            plies: report.plies,
+            defenses,
+            nodes: stats.nodes,
+        })
     }
 }
