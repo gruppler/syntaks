@@ -515,7 +515,15 @@ impl<'a, 'b> Searcher<'a, 'b> {
 
     /// Walk the TT from `pos`, replaying each cell's stored best_move, until
     /// `pv` reaches `target_len`, the chain breaks, or a road appears.
-    fn extend_pv_via_tt(&self, pos: &Position, pv: &mut Vec<Move>, target_len: usize) {
+    ///
+    /// The last ply of a win is not in the table to be replayed. A reply that
+    /// leaves the attacker a road in 1 is refuted by the shortcut in
+    /// [`Searcher::search_defender`], which scores it without recursing, so
+    /// the node where that road would be completed is never searched and
+    /// never stored. Reconstruction therefore ends one ply short of the road
+    /// unless it finishes the job itself, which is what the road-in-1 probe
+    /// below does.
+    fn extend_pv_via_tt(&mut self, pos: &Position, pv: &mut Vec<Move>, target_len: usize) {
         let mut cur = pos.clone();
         for &mv in pv.iter() {
             if !cur.is_legal(mv) {
@@ -527,13 +535,23 @@ impl<'a, 'b> Searcher<'a, 'b> {
             }
         }
         while pv.len() < target_len {
-            let entry = match self.tt.probe(self.tt_key(&cur)) {
-                Some(e) => e,
-                None => return,
-            };
-            let mv = match Move::from_raw(entry.best_move) {
-                Some(m) => m,
-                None => return,
+            let mv = match self.tt.probe(self.tt_key(&cur)) {
+                Some(entry) => match Move::from_raw(entry.best_move) {
+                    Some(m) => m,
+                    None => return,
+                },
+                // No entry: the only ply that can legitimately be missing is
+                // the attacker completing the road, and only as the last one.
+                None => {
+                    if pv.len() + 1 == target_len
+                        && cur.stm() == self.attacker
+                        && let Some(finish) = self.road_in_1_move(&cur)
+                    {
+                        finish
+                    } else {
+                        return;
+                    }
+                }
             };
             if !cur.is_legal(mv) {
                 return;
@@ -1644,6 +1662,58 @@ mod tests {
             assert_eq!(d.pv.len(), 2, "{} pv should reach the road", d.mv);
             assert_eq!(d.pv[0], d.mv, "pv starts with the defence itself");
         }
+    }
+
+    #[test]
+    fn analyze_defenses_lines_reach_the_road_on_a_warm_table() {
+        // With the table already holding the proof — a sweep, or the origin
+        // walk — a reply's own search returns from the TT with a one-move pv
+        // and the rest of the line is reconstructed from stored best moves.
+        // The final road move has no entry to be reconstructed from: the
+        // node it would be played at is refuted by the road-in-1 shortcut,
+        // which scores the reply without recursing into it.
+        let guard = SIZE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        SIZE.store(6, Ordering::Release);
+        crate::board::set_standard_reserves(6);
+        let parse_one = |tps: &str| {
+            let parts: Vec<&str> = tps.split_whitespace().collect();
+            Position::from_tps_parts(&parts).expect("valid tps")
+        };
+        // Black to move with a 5-ply win, and the position after the winning
+        // move, where white is lost and every reply is worth a line.
+        let parent = parse_one(
+            "1112S,2,x4/2,12,221,x,2,2/2,12,112C,2221,x,2/1,112S,x2,1,x/\
+             12221S,x,222221C,112S,21,x/x,1212S,1,1,2121S,1 2 54",
+        );
+        let lost = parse_one(
+            "1112S,2,x4/2,12,221,x,2,2/2,12,112C,222112S,x,2/1,112S,x,1,1,x/\
+             12221S,x,222221C,x,21,x/x,1212S,1,1,2121S,1 1 54",
+        );
+
+        let limits = Limits {
+            max_plies: 11,
+            max_nodes: 50_000,
+            scope: TinueScope::TakChain,
+            ..Default::default()
+        };
+        let mut tt = Tt::new(TT_DEFAULT_BITS);
+        let (proof, _) = solve_with_tt(&parent, &limits, &mut tt);
+        assert!(matches!(proof, TinueResult::Tinue { .. }), "warm the table");
+
+        let (report, _) = analyze_defenses(&lost, Player::P2, &limits, &mut tt);
+        assert!(report.lost);
+        for d in &report.defenses {
+            if let DefenseKind::Loses { plies } = d.kind {
+                assert_eq!(
+                    d.pv.len(),
+                    plies as usize,
+                    "{} line stops short: {:?}",
+                    d.mv,
+                    d.pv.iter().map(|m| m.to_string()).collect::<Vec<_>>()
+                );
+            }
+        }
+        drop(guard);
     }
 
     #[test]
