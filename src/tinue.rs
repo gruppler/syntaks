@@ -660,7 +660,7 @@ impl<'a, 'b> Searcher<'a, 'b> {
 
         let mut moves = Vec::with_capacity(64);
         generate_moves(&mut moves, pos);
-        order_attacker_moves(pos, &mut moves, self.attacker);
+        let winners = order_attacker_moves(pos, &mut moves, self.attacker);
         if let Some(tt_mv) = tt_move
             && let Some(idx) = moves.iter().position(|&m| m == tt_mv)
         {
@@ -673,7 +673,10 @@ impl<'a, 'b> Searcher<'a, 'b> {
             // After attacker's move: if attacker has a road, that's a win.
             // Per current-player-wins rule, even if defender also has a road
             // on the resulting position, attacker (the mover) wins.
-            if next.has_road(self.attacker) {
+            //
+            // The ordering already settled which moves complete a road, so
+            // that is not asked a second time of the rest.
+            if winners > 0 && next.has_road(self.attacker) {
                 pv.clear();
                 pv.push(mv);
                 self.tt.store_win(key, 1, mv.raw());
@@ -682,8 +685,8 @@ impl<'a, 'b> Searcher<'a, 'b> {
 
             // If only defender has a road, attacker handed defender the
             // game — skip. This can happen via a wall-smash that exposes
-            // a defender flat completing their road.
-            if next.has_road(self.attacker.flip()) {
+            // a defender flat completing their road; a placement can't.
+            if mv.is_spread() && next.has_road(self.attacker.flip()) {
                 continue;
             }
 
@@ -1174,7 +1177,7 @@ pub fn road_distance(pos: &Position, player: Player) -> Option<u32> {
 ///     100             — spreads that don't grow the road bitboard
 ///                       (still tactical; can reposition / capture)
 ///     200             — wall placements
-fn order_attacker_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player) {
+fn order_attacker_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player) -> usize {
     let before_road_pop = pos.roads(attacker).popcount() as i32;
     moves.sort_by_cached_key(|&mv| {
         let after = pos.roads_after(mv, attacker);
@@ -1187,6 +1190,8 @@ fn order_attacker_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player)
         }
         if mv.is_spread() { 100 } else { 200 }
     });
+    // The winners sort first. Count them so the caller needn't ask again.
+    moves.partition_point(|&mv| crate::road::has_road(pos.roads_after(mv, attacker)))
 }
 
 /// Order defender moves by likely defensive value. Same tier structure as
