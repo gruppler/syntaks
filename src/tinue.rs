@@ -1218,10 +1218,7 @@ fn order_attacker_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player)
             (key, mv)
         })
         .collect();
-    scored.sort_by_key(|&(k, _)| k);
-    for (slot, (_, mv)) in moves.iter_mut().zip(scored) {
-        *slot = mv;
-    }
+    order_by_tier(moves, scored);
     winners
 }
 
@@ -1233,21 +1230,51 @@ fn order_defender_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player)
     let defender = attacker.flip();
     let attacker_road_before = pos.roads(attacker).popcount() as i32;
     let mut winners = 0usize;
-    moves.sort_by_cached_key(|&mv| {
-        // One walk yields both sides — the defender's own roads decide the
-        // outright refutation, the attacker's decide how much was stripped.
-        let after = pos.roads_after_pair(mv);
-        if crate::road::has_road(after[defender.idx()]) {
-            winners += 1;
-            return -1000i32;
-        }
-        let stripped = attacker_road_before - after[attacker.idx()].popcount() as i32;
-        if stripped > 0 {
-            return -10 * stripped;
-        }
-        if mv.is_spread() { 100 } else { 200 }
-    });
+    let scored: Vec<(i32, Move)> = moves
+        .iter()
+        .map(|&mv| {
+            // One walk yields both sides — the defender's own roads decide the
+            // outright refutation, the attacker's decide how much was stripped.
+            let after = pos.roads_after_pair(mv);
+            let key = if crate::road::has_road(after[defender.idx()]) {
+                winners += 1;
+                -1000i32
+            } else {
+                let stripped = attacker_road_before - after[attacker.idx()].popcount() as i32;
+                if stripped > 0 {
+                    -10 * stripped
+                } else if mv.is_spread() {
+                    100
+                } else {
+                    200
+                }
+            };
+            (key, mv)
+        })
+        .collect();
+    order_by_tier(moves, scored);
     winners
+}
+
+/// Write `scored` back into `moves` in ascending key order, ties in their
+/// original order. Nearly every move lands in the 100 or 200 tier, so only
+/// the few below 100 are sorted; the rest are placed by a stable pass.
+fn order_by_tier(moves: &mut Vec<Move>, scored: Vec<(i32, Move)>) {
+    let mut special: Vec<(i32, Move)> = Vec::new();
+    let mut spreads = Vec::with_capacity(scored.len());
+    let mut placements = Vec::with_capacity(scored.len());
+    for (key, mv) in scored {
+        match key {
+            100 => spreads.push(mv),
+            200 => placements.push(mv),
+            _ => special.push((key, mv)),
+        }
+    }
+    special.sort_by_key(|&(k, _)| k);
+    moves.clear();
+    moves.extend(special.into_iter().map(|(_, mv)| mv));
+    moves.extend(spreads);
+    moves.extend(placements);
 }
 
 #[cfg(test)]
