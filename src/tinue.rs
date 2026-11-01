@@ -660,6 +660,23 @@ impl<'a, 'b> Searcher<'a, 'b> {
 
         let mut moves = Vec::with_capacity(64);
         generate_moves(&mut moves, pos);
+
+        // One ply left: only an outright road can pay, and every other move
+        // would bottom out in a depth-0 defender node. Look for the road
+        // without ordering, applying or filtering the rest.
+        if depth == 1 {
+            for &mv in &moves {
+                if crate::road::has_road(pos.roads_after(mv, self.attacker)) {
+                    pv.clear();
+                    pv.push(mv);
+                    self.tt.store_win(key, 1, mv.raw());
+                    return NodeOutcome::AttackerWins(1);
+                }
+            }
+            self.tt.store_nowin(key, depth, 0);
+            return NodeOutcome::DefenderHolds;
+        }
+
         let winners = order_attacker_moves(pos, &mut moves, self.attacker);
         if let Some(tt_mv) = tt_move
             && let Some(idx) = moves.iter().position(|&m| m == tt_mv)
@@ -791,7 +808,7 @@ impl<'a, 'b> Searcher<'a, 'b> {
         // way — see the road-in-1 shortcut inside the loop below, which
         // consults the resulting position rather than the move's shape.
 
-        order_defender_moves(pos, &mut moves, self.attacker);
+        let refutations = order_defender_moves(pos, &mut moves, self.attacker);
         if let Some(tt_mv) = tt_move
             && let Some(idx) = moves.iter().position(|&m| m == tt_mv)
         {
@@ -807,7 +824,7 @@ impl<'a, 'b> Searcher<'a, 'b> {
             // smashed a wall covering attacker's flat). Per current-player-
             // wins rule, since defender is mover, defender's own road would
             // win for defender — we have to check that too.
-            if next.has_road(self.attacker.flip()) {
+            if refutations > 0 && next.has_road(self.attacker.flip()) {
                 // defender's own road — defender wins, attacker fails to
                 // achieve tinue from this branch.
                 pv.clear();
@@ -1212,14 +1229,16 @@ fn order_attacker_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player)
 /// the attacker ordering — defender's own road wins first (refutes the
 /// tinue outright), then moves that strip attacker road pieces (sliding
 /// off a stack, smashing under a cap), then spreads, then placements.
-fn order_defender_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player) {
+fn order_defender_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player) -> usize {
     let defender = attacker.flip();
     let attacker_road_before = pos.roads(attacker).popcount() as i32;
+    let mut winners = 0usize;
     moves.sort_by_cached_key(|&mv| {
         // One walk yields both sides — the defender's own roads decide the
         // outright refutation, the attacker's decide how much was stripped.
         let after = pos.roads_after_pair(mv);
         if crate::road::has_road(after[defender.idx()]) {
+            winners += 1;
             return -1000i32;
         }
         let stripped = attacker_road_before - after[attacker.idx()].popcount() as i32;
@@ -1228,6 +1247,7 @@ fn order_defender_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player)
         }
         if mv.is_spread() { 100 } else { 200 }
     });
+    winners
 }
 
 #[cfg(test)]
