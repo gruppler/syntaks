@@ -1179,19 +1179,33 @@ pub fn road_distance(pos: &Position, player: Player) -> Option<u32> {
 ///     200             — wall placements
 fn order_attacker_moves(pos: &Position, moves: &mut Vec<Move>, attacker: Player) -> usize {
     let before_road_pop = pos.roads(attacker).popcount() as i32;
-    moves.sort_by_cached_key(|&mv| {
-        let after = pos.roads_after(mv, attacker);
-        if crate::road::has_road(after) {
-            return -1000i32;
-        }
-        let delta = after.popcount() as i32 - before_road_pop;
-        if delta > 0 {
-            return -10 * delta;
-        }
-        if mv.is_spread() { 100 } else { 200 }
-    });
-    // The winners sort first. Count them so the caller needn't ask again.
-    moves.partition_point(|&mv| crate::road::has_road(pos.roads_after(mv, attacker)))
+    // Score each move once, bucketing winners so no second pass is needed.
+    let mut winners = 0usize;
+    let mut scored: Vec<(i32, Move)> = moves
+        .iter()
+        .map(|&mv| {
+            let after = pos.roads_after(mv, attacker);
+            let key = if crate::road::has_road(after) {
+                winners += 1;
+                -1000i32
+            } else {
+                let delta = after.popcount() as i32 - before_road_pop;
+                if delta > 0 {
+                    -10 * delta
+                } else if mv.is_spread() {
+                    100
+                } else {
+                    200
+                }
+            };
+            (key, mv)
+        })
+        .collect();
+    scored.sort_by_key(|&(k, _)| k);
+    for (slot, (_, mv)) in moves.iter_mut().zip(scored) {
+        *slot = mv;
+    }
+    winners
 }
 
 /// Order defender moves by likely defensive value. Same tier structure as

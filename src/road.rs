@@ -47,6 +47,11 @@ pub fn has_road(road_occ: Bitboard) -> bool {
     let left = road_occ & left_edge;
     let right = road_occ & right_edge;
 
+    // A road needs pieces on both edges of an axis; most positions fail this.
+    if (up == 0 || down == 0) && (left == 0 || right == 0) {
+        return false;
+    }
+
     let up = up | (up >> n & road_occ);
     let down = down | (down << n & road_occ);
     let left = left | (left << 1 & road_occ);
