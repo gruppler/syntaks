@@ -226,6 +226,14 @@ impl TeiHandler {
             );
         }
 
+        // Supported sizes and komi, so a client doesn't have to guess them
+        // from the HalfKomi option
+        print!("size 6 halfkomi");
+        for half_komi in Position::MIN_HALF_KOMI..=Position::MAX_HALF_KOMI {
+            print!(" {}", half_komi);
+        }
+        println!();
+
         println!("teiok");
     }
 
@@ -235,18 +243,52 @@ impl TeiHandler {
             return;
         }
 
-        if args.is_empty() {
-            println!("info string Missing size, assuming 6x6");
-        } else {
-            match args[0].parse::<u32>() {
-                Ok(size) => {
-                    if size != 6 {
-                        eprintln!("Warning: Only 6x6 supported");
+        // Either `teinewgame <size>` or `teinewgame size <size> halfkomi <komi>`
+        let mut size_arg = None;
+        let mut half_komi_arg = None;
+
+        if args.first() == Some(&"size") || args.first() == Some(&"halfkomi") {
+            let mut tokens = args.iter();
+            while let Some(&key) = tokens.next() {
+                let value = tokens.next().copied();
+                match (key, value) {
+                    ("size", Some(value)) => size_arg = Some(value),
+                    ("halfkomi", Some(value)) => half_komi_arg = Some(value),
+                    _ => {
+                        eprintln!("Warning: Invalid teinewgame argument '{}'", key);
                         return;
                     }
                 }
+            }
+        } else {
+            size_arg = args.first().copied();
+        }
+
+        match size_arg {
+            None => println!("info string Missing size, assuming 6x6"),
+            Some(size) => match size.parse::<u32>() {
+                Ok(6) => {}
+                Ok(_) => {
+                    eprintln!("Warning: Only 6x6 supported");
+                    return;
+                }
                 Err(_) => {
-                    eprintln!("Warning: Invalid size '{}'", args[0]);
+                    eprintln!("Warning: Invalid size '{}'", size);
+                    return;
+                }
+            },
+        }
+
+        if let Some(half_komi) = half_komi_arg {
+            match half_komi.parse::<i8>() {
+                Ok(half_komi)
+                    if (Position::MIN_HALF_KOMI..=Position::MAX_HALF_KOMI).contains(&half_komi) =>
+                {
+                    self.half_komi = half_komi;
+                    self.pos.set_half_komi(half_komi);
+                }
+                _ => {
+                    eprintln!("Warning: Unsupported komi value '{}'", half_komi);
                     return;
                 }
             }
