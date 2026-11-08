@@ -848,9 +848,19 @@ impl<'a, 'b> Searcher<'a, 'b> {
                 continue;
             }
 
-            // Flat-count terminal positions are not tinue endings. If
-            // defender forces a flat-count draw or win, attacker has no
-            // tinue here.
+            // A reply that ends the game on flats ends it without a road.
+            // If the defender wins the count or draws, that is an escape and
+            // the attacker has no tinue here.
+            //
+            // If the attacker wins the count, the defender has lost on their
+            // own turn — playing out their last stone, or filling the board,
+            // while behind. That is not an escape: a winning strategy assumes
+            // the opponent's best play, and a reply that loses outright is
+            // not best play. Definition 3 of "Forced Win Conditions in the
+            // Game of TAK" (Grimm, rev. 2026) excludes such replies, "e.g. by
+            // playing out their last stone when behind in flat count or by
+            // simply resigning the game". Scored like a reply that completes
+            // the attacker's road: a 1-ply loss for the defender.
             match next.count_flats() {
                 FlatCountOutcome::Win(p) if p == self.attacker.flip() => {
                     // defender wins flat count — attacker loses
@@ -867,12 +877,12 @@ impl<'a, 'b> Searcher<'a, 'b> {
                     return NodeOutcome::DefenderHolds;
                 }
                 FlatCountOutcome::Win(_) => {
-                    // attacker wins flat count — but tinue requires a road
-                    // win, so this is also a refutation.
-                    pv.clear();
-                    pv.push(mv);
-                    self.tt.store_nowin(key, depth, mv.raw());
-                    return NodeOutcome::DefenderHolds;
+                    let cand_plies = 1;
+                    let take = longest.as_ref().map_or(true, |(w, _)| cand_plies > *w);
+                    if take {
+                        longest = Some((cand_plies, vec![mv]));
+                    }
+                    continue;
                 }
                 FlatCountOutcome::None => {}
             }
@@ -1040,6 +1050,16 @@ pub fn score_moves(
         }
 
         match next.count_flats() {
+            // The defender ended the game on flats and lost: not an escape,
+            // see `search_defender`. Reported as the 1-ply win it is for the
+            // attacker, which is how a reply into the attacker's road is.
+            FlatCountOutcome::Win(p) if p == attacker && stm != attacker => {
+                out.push(MoveScore {
+                    mv,
+                    kind: MoveScoreKind::Win { plies: 1 },
+                });
+                continue;
+            }
             FlatCountOutcome::Win(p) => {
                 let outcome = if p == attacker {
                     FlatOutcome::AttackerWin
@@ -1302,6 +1322,7 @@ mod tests {
         SIZE.store(size, Ordering::Release);
         // Reserves live in their own globals and do not follow SIZE.
         crate::board::set_standard_reserves(size);
+        crate::board::KOMI_HALF.store(crate::board::DEFAULT_KOMI_HALF, Ordering::Release);
         let parts: Vec<&str> = tps.split_whitespace().collect();
         (Position::from_tps_parts(&parts).expect("valid tps"), guard)
     }
@@ -1806,6 +1827,111 @@ mod tests {
         );
     }
 
+    /// Like [`parse`], with each side's flat reserve set to `flats`, no
+    /// capstones and no komi, so that a side can be down to its last stone on
+    /// a small board and the flat counts are the plain ones.
+    #[must_use]
+    fn parse_with_reserves(tps: &str, size: u8, flats: u8) -> (Position, MutexGuard<'static, ()>) {
+        let guard = SIZE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        SIZE.store(size, Ordering::Release);
+        crate::board::FLATS.store(flats, Ordering::Release);
+        crate::board::CAPS.store(0, Ordering::Release);
+        // No komi, so that the flat counts in these tests are the plain ones
+        crate::board::KOMI_HALF.store(0, Ordering::Release);
+        let parts: Vec<&str> = tps.split_whitespace().collect();
+        (Position::from_tps_parts(&parts).expect("valid tps"), guard)
+    }
+
+    // P1 (flats on a1, b1) is two squares short of rank 1; P2 has five walls
+    // and a single stone in hand, and nothing near rank 1. P1 plays one of
+    // the squares, threatening the other, and the only way left to stop the
+    // road is for P2 to place the last stone there. That ends the game on
+    // flats with P1 ahead, 3 to at most 1.
+    const LAST_STONE_LOSES: &str = "2S,x3/2S,2S,2S,2S/x4/1,1,x2 1 4";
+    // The same, with P2's pieces flat instead: placing the last stone there
+    // ends the game with P2 ahead, which is a way out.
+    const LAST_STONE_WINS: &str = "2,x3/2,2,2,x/x4/1,1,x2 1 4";
+
+    #[test]
+    fn a_reply_that_loses_on_flats_is_not_an_escape() {
+        // Definition 3 of Grimm's "Forced Win Conditions in the Game of TAK"
+        // excludes replies "by which they immediately lose the game on their
+        // turn", e.g. playing out their last stone when behind in flat count.
+        // Blocking with it is not a defence, so this is a tinue.
+        let (pos, _guard) = parse_with_reserves(LAST_STONE_LOSES, 4, 6);
+        let limits = Limits {
+            max_plies: 3,
+            ..Default::default()
+        };
+        let (result, _) = solve(&pos, &limits);
+        assert!(
+            matches!(result, TinueResult::Tinue { plies: 3, .. }),
+            "expected a 3-ply tinue, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn a_reply_that_wins_on_flats_is_still_an_escape() {
+        // The other side of the same rule: when placing the last stone wins
+        // the count for the defender, it does end the threat.
+        let (pos, _guard) = parse_with_reserves(LAST_STONE_WINS, 4, 6);
+        let limits = Limits {
+            max_plies: 5,
+            ..Default::default()
+        };
+        let (result, _) = solve(&pos, &limits);
+        assert!(
+            matches!(result, TinueResult::NoTinue { .. }),
+            "expected NoTinue, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn analyze_defenses_counts_a_reply_that_loses_on_flats_as_lost() {
+        // After P1 plays d1, P2's every reply loses: the last stone at c1
+        // ends the game on flats with P1 ahead, anything else leaves c1 for
+        // P1. The flat loss is as good as a 1-ply loss for the defender.
+        let (pos, _guard) = parse_with_reserves("2S,x3/2S,2S,2S,2S/x4/1,1,x,1 2 4", 4, 6);
+        let limits = Limits {
+            max_plies: 3,
+            ..Default::default()
+        };
+        let mut tt = Tt::new(TT_DEFAULT_BITS);
+        let (report, _) = analyze_defenses(&pos, Player::P1, &limits, &mut tt);
+
+        assert!(report.lost, "every reply should lose for P2");
+        let last_stone = report
+            .defenses
+            .iter()
+            .find(|d| d.mv.to_string() == "c1")
+            .expect("c1 is a legal reply");
+        assert!(
+            matches!(last_stone.kind, DefenseKind::Loses { plies: 1 }),
+            "c1 scored {:?}, expected Loses {{ plies: 1 }}",
+            last_stone.kind
+        );
+    }
+
+    #[test]
+    fn score_moves_reports_a_reply_that_loses_on_flats_as_a_win() {
+        // Scored from P1's side, with P2 to move: c1 ends the game on flats
+        // and P1 wins the count, the same verdict as a reply into P1's road.
+        let (pos, _guard) = parse_with_reserves("2S,x3/2S,2S,2S,2S/x4/1,1,x,1 2 4", 4, 6);
+        let tt = Tt::new(TT_DEFAULT_BITS);
+        let scores = score_moves(&pos, Player::P1, TinueScope::Full, &tt);
+        let c1 = scores
+            .iter()
+            .find(|s| s.mv.to_string() == "c1")
+            .expect("c1 in legal moves");
+        assert!(
+            matches!(c1.kind, MoveScoreKind::Win { plies: 1 }),
+            "expected Win {{ plies: 1 }} for c1, got {:?}",
+            c1.kind
+        );
+    }
+
     #[test]
     fn score_moves_marks_winning_first_move() {
         // Mate-in-one: P1 places on e1 to complete a rank-1 road. After
@@ -2190,9 +2316,15 @@ pub fn analyze_defenses(
             (DefenseKind::Holds, Vec::new())
         } else if next.has_road(attacker) {
             (DefenseKind::Loses { plies: 1 }, Vec::new())
+        } else if let FlatCountOutcome::Win(p) = next.count_flats()
+            && p == attacker
+        {
+            // The defender ended the game on flats and lost, which is no
+            // escape: see `search_defender`.
+            (DefenseKind::Loses { plies: 1 }, Vec::new())
         } else if !matches!(next.count_flats(), FlatCountOutcome::None) {
-            // A game that ends on flats ends without a road, so it refutes
-            // the tinue whoever it favours.
+            // A game that ends on flats ends without a road, so a draw or a
+            // flat win for the defender refutes the tinue.
             (DefenseKind::Holds, Vec::new())
         } else {
             let mut found = (DefenseKind::Holds, Vec::new());
